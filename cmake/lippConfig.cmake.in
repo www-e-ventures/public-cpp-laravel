@@ -1,0 +1,9 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads) # framework links Threads::Threads (HTTP server)
+
+# Exposes the imported targets lipp::framework (+ lipp::framework_sqlite if installed).
+include("${CMAKE_CURRENT_LIST_DIR}/lippTargets.cmake")
+
+check_required_components(lipp)

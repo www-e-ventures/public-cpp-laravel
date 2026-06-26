@@ -1,0 +1,10 @@
+{
+    "name": "cpp-laravel/parity",
+    "description": "Behavioural parity oracle: one phpunit suite vs the C++ app and a PHP reference app.",
+    "require-dev": {
+        "phpunit/phpunit": "^11.0"
+    },
+    "autoload-dev": {
+        "classmap": ["tests/"]
+    }
+}
