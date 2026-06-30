@@ -83,4 +83,82 @@ inline std::string decode(const std::string& frame) {
     return out;
 }
 
+// --- Frame parsing for a live connection loop --------------------------------
+// `decode()` above assumes a single complete text frame; a real server loop must
+// also see the opcode (to answer Ping and notice Close) and cope with a buffer
+// that holds a partial frame or several frames back-to-back. `parse_frame` reads
+// ONE frame from the front of `buf`: on success it reports the opcode, the FIN
+// bit (so a caller can reassemble a message split across frames), the payload,
+// and how many bytes it consumed; if `buf` doesn't yet hold a whole frame it
+// returns `ok == false` so the caller can read more bytes and try again.
+
+enum class Opcode : unsigned char {
+    Continuation = 0x0,
+    Text = 0x1,
+    Binary = 0x2,
+    Close = 0x8,
+    Ping = 0x9,
+    Pong = 0xA,
+};
+
+struct Frame {
+    Opcode opcode = Opcode::Text;
+    std::string payload;
+    bool fin = false;           // FIN bit: the last frame of a (maybe fragmented) message
+    bool ok = false;            // a complete frame was parsed out of the buffer
+    std::size_t consumed = 0;   // bytes the frame occupied at the front of `buf`
+};
+
+inline Frame parse_frame(const std::string& buf) {
+    Frame f;
+    if (buf.size() < 2) return f; // need at least the two-byte header
+    auto byte = [&](std::size_t k) { return static_cast<unsigned char>(buf[k]); };
+
+    f.fin = (byte(0) & 0x80) != 0;
+    f.opcode = static_cast<Opcode>(byte(0) & 0x0F);
+    bool masked = (byte(1) & 0x80) != 0;
+    std::uint64_t len = byte(1) & 0x7F;
+    std::size_t i = 2;
+    if (len == 126) {
+        if (buf.size() < 4) return f;
+        len = (static_cast<std::uint64_t>(byte(2)) << 8) | byte(3);
+        i = 4;
+    } else if (len == 127) {
+        if (buf.size() < 10) return f;
+        len = 0;
+        for (int k = 0; k < 8; ++k) len = (len << 8) | byte(2 + static_cast<std::size_t>(k));
+        i = 10;
+    }
+    unsigned char mask[4] = {0, 0, 0, 0};
+    if (masked) {
+        if (buf.size() < i + 4) return f;
+        for (int k = 0; k < 4; ++k) mask[k] = byte(i + static_cast<std::size_t>(k));
+        i += 4;
+    }
+    if (buf.size() < i + len) return f; // payload not fully arrived yet
+
+    f.payload.reserve(len);
+    for (std::uint64_t j = 0; j < len; ++j) {
+        unsigned char c = byte(i + j);
+        f.payload.push_back(static_cast<char>(masked ? (c ^ mask[j % 4]) : c));
+    }
+    f.consumed = i + len;
+    f.ok = true;
+    return f;
+}
+
+// A server->client close frame (FIN + Close opcode, empty payload, unmasked).
+inline std::string encode_close() {
+    return std::string{static_cast<char>(0x88), static_cast<char>(0x00)};
+}
+
+// A server->client Pong echoing a Ping's payload (payloads are <= 125 by spec).
+inline std::string encode_pong(const std::string& payload) {
+    std::string f;
+    f.push_back(static_cast<char>(0x8A)); // FIN + Pong opcode
+    f.push_back(static_cast<char>(payload.size() & 0x7F));
+    f += payload;
+    return f;
+}
+
 } // namespace ws

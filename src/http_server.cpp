@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -114,11 +115,47 @@ std::string read_request(int fd) {
     return data;
 }
 
+// Lower-case copy, for case-insensitive header matching (header names/values are
+// case-insensitive, and a client may send "Connection: keep-alive, Upgrade").
+std::string lower(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+// True if the request is a WebSocket Upgrade (Upgrade: websocket + Connection
+// listing "upgrade"). Pure string inspection — no OpenSSL, no framing.
+bool is_websocket_upgrade(const Request& req) {
+    const std::string* upgrade = nullptr;
+    const std::string* connection = nullptr;
+    for (const auto& kv : req.headers) {
+        std::string name = lower(kv.first);
+        if (name == "upgrade") upgrade = &kv.second;
+        else if (name == "connection") connection = &kv.second;
+    }
+    if (!upgrade || !connection) return false;
+    return lower(*upgrade).find("websocket") != std::string::npos &&
+           lower(*connection).find("upgrade") != std::string::npos;
+}
+
 } // namespace
 
 void HttpServer::handle_client(int client) {
     std::string raw = read_request(client);
     auto req = parse_http_request(raw);
+
+    // WebSocket Upgrade: hand the live socket to the registered endpoint handler,
+    // which owns it for the connection's lifetime (handshake + frame loop) and
+    // closes it. If nothing is registered for the path, fall through to a 404.
+    if (req && is_websocket_upgrade(*req)) {
+        auto it = ws_handlers_.find(req->path);
+        if (it != ws_handlers_.end()) {
+            it->second(client, *req);
+            return;
+        }
+        // Upgrade requested but no endpoint registered for this path: fall through
+        // to the normal request cycle (the router answers, typically a 404).
+    }
+
     Response res = req ? kernel_->handle(*req) : Response{400, "Bad Request"};
     std::string out = format_http_response(res);
 
