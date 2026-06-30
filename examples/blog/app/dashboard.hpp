@@ -11,7 +11,7 @@ public:
     std::string render() const override {
         // Each child is its own component (own id, state, actions). The morphing
         // client preserves nested [wire:id] subtrees, so a parent re-render won't
-        // clobber a child's live state.
+        // clobber a child's live state
         return "<h2>Dashboard</h2>" + mount_child("counter", "counter-a") +
                mount_child("counter", "counter-b");
     }
