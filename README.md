@@ -138,7 +138,6 @@ examples/blog/  the demo APP built ON the framework — your project's shape:
   tests/          app feature/integration tests (Laravel-flavoured DSL)
   CMakeLists.txt  links the `framework` target
 parity/         optional PHP/phpunit behavioural parity oracle
-docs/           design notes (e.g. docs/eloquent-notes.md)
 slice.cpp       original single-file prototype, kept for reference (not built)
 ```
 
@@ -490,8 +489,7 @@ and uses `Users::find` once in `main.cpp` to exercise the path — deliberately 
 ## Eloquent (repository-style ORM)
 
 Eloquent is the hardest part to port (it leans on magic attribute access and runtime reflection).
-Following the design notes in [`docs/eloquent-notes.md`](docs/eloquent-notes.md), it takes the
-**repository** path, not ActiveRecord:
+It takes the **repository** path, not ActiveRecord:
 
 - `database.hpp` — a `Connection` contract plus `MemoryConnection`, a zero-dependency in-memory
   backend (a SQL driver can implement the same contract later without touching anything above).

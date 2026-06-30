@@ -1,4 +1,4 @@
-// genmodel.cpp — model-mapper codegen (see docs/eloquent-notes.md).
+// genmodel.cpp — model-mapper codegen.
 //
 // Reads a header, finds each plain model struct (one with an `id` field), and emits
 // the mechanical Mapper + Repository<T, Mapper> alias we otherwise hand-write — the

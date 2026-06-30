@@ -1,6 +1,6 @@
 // repository.hpp — generic typed repository + fluent query builder over a Connection
 //
-// The repository-style alternative to Eloquent's ActiveRecord (see docs/eloquent-notes.md):
+// The repository-style alternative to Eloquent's ActiveRecord:
 // models are plain typed structs; a hand-written Mapper bridges model <-> Row.
 // No magic attribute access, no global state — dependencies are explicit and the whole
 // thing is compile-checked.

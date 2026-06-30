@@ -1,6 +1,6 @@
 // author.hpp — a second persistent model + mapper.
 // Exists mainly to make the mapper-boilerplate measurement concrete: compare this
-// against article.hpp to gauge whether codegen (see docs/eloquent-notes.md)
+// against article.hpp to gauge whether codegen
 // would pay for itself across many models.
 #pragma once
 #include <cstdint>

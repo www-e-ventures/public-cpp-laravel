@@ -3,7 +3,7 @@
 // No dynamic `$model->comments` magic — each relationship is a free function that
 // returns a QueryBuilder scoped by the foreign key, so callers can chain further
 // constraints (e.g. .where("approved", Value{true}).get()). This is the honest
-// repository-style mapping (docs/eloquent-notes.md): relationships are queries.
+// repository-style mapping: relationships are queries.
 #pragma once
 #include <cstdint>
 #include <optional>
