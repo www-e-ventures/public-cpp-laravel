@@ -13,6 +13,10 @@ a threaded HTTP server, and a `cpp-artisan` CLI — all as compiled C++.
 The request lifecycle sits behind a single C entry point, so the *same* compiled code runs three
 ways: **natively**, from **PHP via FFI**, and **in your browser as WebAssembly**.
 
+Beyond the demo app in this repo, the framework has a real consumer: a 1990s-style bulletin board
+system (BBS) that serves a single ANSI/CP437 byte stream over telnet, the web, dial-up modem, and
+LoRa radio. It vendors this core and drives it through the same lifecycle.
+
 > **~390,000 requests/sec.** A quick node benchmark of `GET /articles/1` running as WebAssembly —
 > 100k–500k iterations, single machine, and that figure *includes* the JS↔WASM call overhead.
 > Native is faster; the point is that the whole router → middleware → container → ORM → JSON path
