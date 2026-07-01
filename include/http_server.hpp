@@ -5,6 +5,7 @@
 // so the only untested part is the thin socket loop. Single-threaded, Connection:
 // close — enough to reach the app from curl/a browser, not a production server.
 #pragma once
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -30,6 +31,11 @@ public:
     // safe because the container and connections are thread-safe.
     int serve(int workers = 1);
 
+    // Stop a running serve(): close the listening socket and break the accept loop
+    // so serve() returns. Meant to be called from another thread (e.g. a signal
+    // handler or a dedicated shutdown thread) while serve() blocks. Idempotent.
+    void stop();
+
     // A WebSocket endpoint. When a request to `path` carries the WebSocket
     // Upgrade headers, the server hands the raw client socket and the parsed
     // request to `handler` instead of running the normal request->response cycle.
@@ -51,4 +57,6 @@ private:
     std::shared_ptr<KernelContract> kernel_;
     int port_;
     std::unordered_map<std::string, WebSocketHandler> ws_handlers_;
+    std::atomic<bool> running_{false};
+    std::atomic<int> server_fd_{-1};
 };

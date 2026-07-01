@@ -49,4 +49,14 @@ public:
     void post(const std::string& uri, Handler h, std::vector<Middleware> mw = {}) {
         add("POST", uri, std::move(h), std::move(mw));
     }
+    void put(const std::string& uri, Handler h, std::vector<Middleware> mw = {}) {
+        add("PUT", uri, std::move(h), std::move(mw));
+    }
+    void patch(const std::string& uri, Handler h, std::vector<Middleware> mw = {}) {
+        add("PATCH", uri, std::move(h), std::move(mw));
+    }
+    // `delete` is a C++ keyword, so the DELETE verb is spelled `del`.
+    void del(const std::string& uri, Handler h, std::vector<Middleware> mw = {}) {
+        add("DELETE", uri, std::move(h), std::move(mw));
+    }
 };

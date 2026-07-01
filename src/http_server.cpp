@@ -54,7 +54,12 @@ std::optional<Request> parse_http_request(const std::string& raw) {
     Request req;
     req.method = request_line.substr(0, sp1);
     std::string target = request_line.substr(sp1 + 1, sp2 - sp1 - 1);
-    req.path = target.substr(0, target.find('?')); // drop query string (slice scope)
+    // Keep req.path query-free; parse the query string into req.query (url-decoded
+    // like a form body). Callers read filters/pagination off req.query.
+    auto qmark = target.find('?');
+    req.path = target.substr(0, qmark);
+    if (qmark != std::string::npos)
+        req.query = parse_pairs(target.substr(qmark + 1), '&', /*decode=*/true);
     req.body = body;
 
     std::size_t pos = (line_end == std::string::npos) ? head.size() : line_end + 2;
@@ -170,11 +175,24 @@ void HttpServer::handle_client(int client) {
 
 void HttpServer::accept_loop(int server_fd) {
     // Multiple worker threads may call accept() on the same listening socket; the
-    // kernel hands each connection to exactly one of them.
-    while (true) {
+    // kernel hands each connection to exactly one of them. stop() closes the socket,
+    // which makes accept() fail — the running_ check then breaks the loop.
+    while (running_) {
         int client = ::accept(server_fd, nullptr, nullptr);
-        if (client < 0) continue;
+        if (client < 0) {
+            if (!running_) break;
+            continue;
+        }
         handle_client(client);
+    }
+}
+
+void HttpServer::stop() {
+    running_ = false;
+    int fd = server_fd_.exchange(-1);
+    if (fd >= 0) {
+        ::shutdown(fd, SHUT_RDWR); // wake any accept() blocked on this socket
+        ::close(fd);
     }
 }
 
@@ -204,15 +222,21 @@ int HttpServer::serve(int workers) {
                 port_, workers, workers == 1 ? "" : "s");
     std::fflush(stdout);
 
+    running_ = true;
+    server_fd_ = server_fd;
+
     if (workers == 1) {
         accept_loop(server_fd);
-        return 0;
+    } else {
+        std::vector<std::thread> pool;
+        pool.reserve(static_cast<std::size_t>(workers));
+        for (int i = 0; i < workers; ++i)
+            pool.emplace_back([this, server_fd] { accept_loop(server_fd); });
+        for (auto& t : pool) t.join();
     }
 
-    std::vector<std::thread> pool;
-    pool.reserve(static_cast<std::size_t>(workers));
-    for (int i = 0; i < workers; ++i)
-        pool.emplace_back([this, server_fd] { accept_loop(server_fd); });
-    for (auto& t : pool) t.join();
+    // Close the listening socket if stop() didn't already (idempotent via exchange).
+    int fd = server_fd_.exchange(-1);
+    if (fd >= 0) ::close(fd);
     return 0;
 }

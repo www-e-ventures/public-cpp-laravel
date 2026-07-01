@@ -3,13 +3,21 @@
 // formatting — the parts with real logic — are unit-tested here.
 #include "test_harness.hpp"
 
+#include <atomic>
+#include <chrono>
+#include <memory>
 #include <string>
+#include <thread>
 
 #include "http.hpp"
 #include "http_server.hpp"
+#include "kernel_contract.hpp"
 
 namespace {
 bool has(const std::string& h, const std::string& n) { return h.find(n) != std::string::npos; }
+struct StubKernel : KernelContract {
+    Response handle(Request) override { return Response{200, "ok"}; }
+};
 } // namespace
 
 TEST(http_parse_request_line_and_headers) {
@@ -17,8 +25,40 @@ TEST(http_parse_request_line_and_headers) {
         "GET /articles?page=2 HTTP/1.1\r\nHost: localhost\r\nAuthorization: secret-token\r\n\r\n");
     CHECK(req.has_value());
     CHECK_EQ(req->method, std::string("GET"));
-    CHECK_EQ(req->path, std::string("/articles")); // query string dropped
+    CHECK_EQ(req->path, std::string("/articles"));     // path stays query-free
+    CHECK_EQ(req->query.at("page"), std::string("2"));  // query parsed into req->query
     CHECK_EQ(req->headers.at("Authorization"), std::string("secret-token"));
+}
+
+TEST(http_url_decode_percent_and_plus) {
+    CHECK_EQ(url_decode("hello+world"), std::string("hello world"));
+    CHECK_EQ(url_decode("a%20b%2Fc"), std::string("a b/c"));
+    CHECK_EQ(url_decode("100%25"), std::string("100%"));
+    CHECK_EQ(url_decode("a+b", /*plus_as_space=*/false), std::string("a+b")); // keep '+'
+    CHECK_EQ(url_decode("bad%2"), std::string("bad%2"));  // malformed escape left as-is
+}
+
+TEST(http_parse_form_url_decodes) {
+    auto f = parse_form("title=hello+world&path=%2Fapi%2Fx&raw=a%26b");
+    CHECK_EQ(f.at("title"), std::string("hello world"));
+    CHECK_EQ(f.at("path"), std::string("/api/x"));
+    CHECK_EQ(f.at("raw"), std::string("a&b")); // %26 is a literal '&', not a separator
+}
+
+TEST(http_parse_query_string_into_request) {
+    auto req = parse_http_request(
+        "GET /api/messages?since=42&q=hello+world&limit=20 HTTP/1.1\r\nHost: x\r\n\r\n");
+    CHECK(req.has_value());
+    CHECK_EQ(req->path, std::string("/api/messages"));
+    CHECK_EQ(req->query.at("since"), std::string("42"));
+    CHECK_EQ(req->query.at("q"), std::string("hello world"));
+    CHECK_EQ(req->query.at("limit"), std::string("20"));
+}
+
+TEST(http_no_query_leaves_empty_map) {
+    auto req = parse_http_request("GET /health HTTP/1.1\r\nHost: x\r\n\r\n");
+    CHECK(req.has_value());
+    CHECK(req->query.empty());
 }
 
 TEST(http_parse_body) {
@@ -45,4 +85,33 @@ TEST(http_format_response_sets_status_and_length) {
 TEST(http_format_response_reason_phrases) {
     CHECK(has(format_http_response(Response{404, "x"}), "404 Not Found"));
     CHECK(has(format_http_response(Response{201, "x"}), "201 Created"));
+}
+
+// stop() must break a running serve() from another thread. Written to be
+// hang-proof: it retries stop() a bounded number of times and detaches rather
+// than block the suite if a regression ever leaves serve() stuck.
+TEST(http_server_stop_ends_serve) {
+    auto kernel = std::make_shared<StubKernel>();
+    HttpServer server(kernel, 48771);
+    std::atomic<bool> done{false};
+    int result = 1;
+    std::thread t([&] {
+        result = server.serve(2);
+        done = true;
+    });
+
+    // A stop() that lands before serve() finished binding is a no-op; the next
+    // iteration takes effect once the accept loop is up. Bounded at ~2s.
+    for (int i = 0; i < 200 && !done; ++i) {
+        server.stop();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    CHECK(done.load());
+    if (done.load()) {
+        t.join();
+        CHECK_EQ(result, 0);
+    } else {
+        t.detach(); // serve() hung — don't wedge the rest of the suite
+    }
 }

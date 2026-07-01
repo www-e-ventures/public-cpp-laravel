@@ -30,6 +30,19 @@ TEST(router_contract_matches_and_extracts_params) {
     CHECK(!router.match(req("POST", "/articles/42")).has_value()); // wrong verb
 }
 
+TEST(router_contract_supports_put_patch_delete) {
+    Router concrete;
+    RouterContract& router = concrete;
+    router.put("/articles/{id}", [](Request&) { return Response{200, "put"}; });
+    router.patch("/articles/{id}", [](Request&) { return Response{200, "patch"}; });
+    router.del("/tokens/{id}", [](Request&) { return Response{200, "del"}; });
+
+    CHECK(router.match(req("PUT", "/articles/7")).has_value());
+    CHECK(router.match(req("PATCH", "/articles/7")).has_value());
+    CHECK(router.match(req("DELETE", "/tokens/7")).has_value());
+    CHECK(!router.match(req("GET", "/articles/7")).has_value()); // no GET registered
+}
+
 TEST(router_contract_list_reports_registered_routes) {
     Router concrete;
     RouterContract& router = concrete;
