@@ -1,0 +1,23 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>coco-web — WebSocket terminal</title>
+<h1>coco-web terminal (WebSocket)</h1>
+<p>A byte stream over a WebSocket, rendered below — the shape a retro terminal (e.g. a CoCo
+client dialing into a BBS) takes. Type a line and press Enter to send it.</p>
+<pre id="screen" style="background:#111;color:#0f0;padding:1em;min-height:9em;white-space:pre-wrap"></pre>
+<input id="in" autofocus style="width:100%;box-sizing:border-box" placeholder="type here, Enter to send">
+<script>
+  const screen = document.getElementById('screen');
+  const input = document.getElementById('in');
+  const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+  const ws = new WebSocket(proto + location.host + '/terminal');
+  ws.binaryType = 'arraybuffer'; // the server streams raw bytes as binary frames
+  ws.onmessage = (e) => {
+    screen.textContent += new TextDecoder().decode(new Uint8Array(e.data));
+    screen.scrollTop = screen.scrollHeight;
+  };
+  ws.onclose = () => { screen.textContent += '\n[connection closed]'; };
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { ws.send(input.value); input.value = ''; }
+  });
+</script>

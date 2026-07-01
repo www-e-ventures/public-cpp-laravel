@@ -6,6 +6,7 @@
 
 #include <optional>
 #include <string>
+#include <thread>
 
 #include "http.hpp"
 #include "websocket.hpp"
@@ -279,6 +280,80 @@ TEST(websocket_hub_broadcasts_to_all_connections) {
     c2.close();
     ::close(a[1]);
     ::close(b[1]);
+}
+
+TEST(websocket_encode_binary_frame_is_byte_exact) {
+    std::string payload = std::string(1, '\0') + "\x80\xff" + "bytes"; // non-UTF-8
+    std::string f = ws::encode_binary(payload);
+    CHECK_EQ(static_cast<unsigned char>(f[0]), 0x82);                       // FIN + binary
+    CHECK_EQ(static_cast<unsigned char>(f[1]), static_cast<unsigned char>(payload.size()));
+    ws::Frame fr = ws::parse_frame(f); // server frames are unmasked
+    CHECK(fr.ok);
+    CHECK(fr.opcode == ws::Opcode::Binary);
+    CHECK_EQ(fr.payload, payload); // byte-exact, incl. NUL + high bytes
+}
+
+TEST(websocket_connection_send_binary) {
+    int sv[2];
+    CHECK(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    int server_fd = sv[0], client_fd = sv[1];
+    Request req;
+    req.headers["Sec-WebSocket-Key"] = "dGhlIHNhbXBsZSBub25jZQ==";
+    ws::Connection conn(server_fd, req);
+    CHECK(conn.handshake());
+    char buf[512];
+    ::recv(client_fd, buf, sizeof(buf), 0); // drain the 101
+
+    // A CP437/ANSI-ish byte stream (not valid UTF-8) survives byte-exact.
+    std::string bytes;
+    bytes.push_back('\0');
+    bytes.push_back(static_cast<char>(0x1b)); // ESC
+    bytes += "[31mred";
+    bytes.push_back(static_cast<char>(0xff));
+    CHECK(conn.send_binary(bytes));
+
+    ssize_t n = ::recv(client_fd, buf, sizeof(buf), 0);
+    CHECK(n > 0);
+    ws::Frame fr = ws::parse_frame(std::string(buf, static_cast<std::size_t>(n)));
+    CHECK(fr.opcode == ws::Opcode::Binary);
+    CHECK_EQ(fr.payload, bytes);
+
+    conn.close();
+    ::close(client_fd);
+}
+
+TEST(websocket_run_terminal_echoes_input_as_binary) {
+    int sv[2];
+    CHECK(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    int server_fd = sv[0], client_fd = sv[1];
+    Request req;
+    req.headers["Sec-WebSocket-Key"] = "dGhlIHNhbXBsZSBub25jZQ==";
+    ws::Connection conn(server_fd, req);
+    CHECK(conn.handshake());
+    char buf[512];
+    ::recv(client_fd, buf, sizeof(buf), 0); // drain the 101
+
+    std::thread t([&] {
+        ws::run_terminal(conn, [](ws::Connection& c, const std::string& in) {
+            c.send_binary("[" + in + "]"); // echo each line, wrapped
+        });
+    });
+
+    std::string in = masked_frame(0x1, "hi");
+    ::send(client_fd, in.data(), in.size(), 0);
+    ssize_t n = ::recv(client_fd, buf, sizeof(buf), 0);
+    CHECK(n > 0);
+    ws::Frame fr = ws::parse_frame(std::string(buf, static_cast<std::size_t>(n)));
+    CHECK(fr.opcode == ws::Opcode::Binary);
+    CHECK_EQ(fr.payload, std::string("[hi]"));
+
+    // Client closes -> receive() returns nullopt -> run_terminal returns -> thread joins.
+    std::string close = masked_frame(0x8, "");
+    ::send(client_fd, close.data(), close.size(), 0);
+    t.join();
+
+    conn.close();
+    ::close(client_fd);
 }
 
 int main() { return RUN_ALL_TESTS(); }

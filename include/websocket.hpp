@@ -55,6 +55,29 @@ inline std::string encode_text(const std::string& payload) {
     return f;
 }
 
+// Encode a server->client binary frame (FIN + binary opcode, unmasked). Use this for
+// raw byte streams — a terminal's ANSI/CP437 output isn't valid UTF-8, so it can't
+// ride in a text frame. Handles all three RFC 6455 length forms (so large output is
+// fine, not just the < 64 KiB that encode_text covers).
+inline std::string encode_binary(const std::string& payload) {
+    std::string f;
+    f.push_back(static_cast<char>(0x82)); // FIN=1, opcode=0x2 (binary)
+    std::size_t n = payload.size();
+    if (n < 126) {
+        f.push_back(static_cast<char>(n));
+    } else if (n <= 0xFFFF) {
+        f.push_back(static_cast<char>(126));
+        f.push_back(static_cast<char>((n >> 8) & 0xFF));
+        f.push_back(static_cast<char>(n & 0xFF));
+    } else {
+        f.push_back(static_cast<char>(127));
+        for (int i = 7; i >= 0; --i)
+            f.push_back(static_cast<char>((static_cast<std::uint64_t>(n) >> (i * 8)) & 0xFF));
+    }
+    f += payload;
+    return f;
+}
+
 // Decode a frame's payload (handles client masking). Assumes a single complete frame.
 inline std::string decode(const std::string& frame) {
     if (frame.size() < 2) return "";

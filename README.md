@@ -7,8 +7,9 @@
 **The Laravel request lifecycle — compiled.** A Laravel-shaped web framework in modern C++20:
 a service container with autowiring, service providers, facades, routing + middleware, an
 Eloquent-style ORM (query builder, relationships, migrations, real SQLite), Blade templates,
-Livewire-style reactive components, auth/session/gates/CSRF, cache/queue/mail/events/broadcasting,
-a threaded HTTP server, and a `cpp-artisan` CLI — all as compiled C++.
+Livewire-style reactive components, auth/session/gates/CSRF plus signed tokens, static file serving,
+cache/queue/mail/events/broadcasting, a threaded HTTP server, and a `cpp-artisan` CLI — all as
+compiled C++.
 
 The request lifecycle sits behind a single C entry point, so the *same* compiled code runs three
 ways: **natively**, from **PHP via FFI**, and **in your browser as WebAssembly**.
@@ -310,6 +311,54 @@ may send only the properties it knows.
 
 The server half is fully unit-tested (`tests/test_livewire.cpp`, `examples/blog/tests/test_feature_livewire.cpp`);
 the JS client is exercised in the browser. Next for Livewire: nested components and lifecycle hooks.
+
+## HTTP, routing & static serving
+
+`HttpServer` is a threaded, blocking HTTP/1.1 server (`Connection: close`) that bridges real sockets
+to the Kernel: read a request, `Kernel::handle` it, write the response — enough to reach the app from
+a browser or `curl`, not a production edge. `HttpServer::stop()` closes the listening socket and
+breaks the accept loop, so a server running on a background thread shuts down cleanly on
+SIGINT/SIGTERM.
+
+`Router` registers handlers with `get`/`post`/`put`/`patch`/`del` (`del`, because `delete` is a
+keyword); `add()` accepts any method string. Path params compile to a regex: `{id}` matches one
+segment, `{path*}` is a catch-all that matches `/` too (for static prefixes). The query string is
+parsed into `Request.query`, and both form bodies and query strings are percent-decoded (`%XX`, and
+`+` → space) via `url_decode` / `parse_form`.
+
+Static files (`static_files.hpp`, header-only, std-lib-only): `staticfiles::serve(root, rel, req)`
+serves a file with a MIME table (notably `.wasm → application/wasm`, which browsers require for
+`WebAssembly.instantiateStreaming`), byte-range requests (`Range` → 206/416), `ETag` +
+`If-None-Match` → 304, and `Cache-Control`. Bodies are byte-exact; paths that escape `root` are
+refused. `staticfiles::mount(router, "/dist", dir)` wires a catch-all static route. `examples/coco-web/`
+puts it together — a static single-page app served next to a JSON API.
+
+WebSocket (`websocket.hpp` / `websocket_server.hpp`, OpenSSL-gated for the SHA-1 accept key):
+`HttpServer::on_websocket(path, handler)` hands an Upgrade request's raw socket to a handler;
+`ws::Connection` does the RFC 6455 handshake and per-connection frame loop (text/binary,
+ping/pong/close, and reassembly of fragmented messages), and `ws::Hub` broadcasts to every open
+connection. The framework core stays OpenSSL-free — the handler opts into the crypto.
+
+## Auth, sessions & tokens
+
+Session auth is a `SessionGuard` over a session store (`auth.hpp`, `session.hpp`); authorization is
+gates and policies (`gate.hpp`) — named abilities checked with `allows()`/`denies()`, with a
+`before()` hook for admin overrides.
+
+For APIs and cross-service identity there's an optional, OpenSSL-gated token layer (next to the
+PBKDF2 hasher; the core stays dependency-free):
+
+- **Stateless signed tokens** (`token.hpp`): `tok::sign(claims, secret)` / `tok::verify(token,
+  secret)` produce and check a compact HS256 JWT. `Claims` carry a subject, abilities, and an expiry;
+  verify is constant-time and honours `exp`. A backend that shares the secret verifies with no
+  database round-trip. `tok::requires_ability("room:library", secret)` is route middleware that gates
+  on a bearer token's abilities.
+- **Personal access tokens** (`personal_access_token.hpp`): `pat::Store` over the ORM `Connection` —
+  `issue()` returns the plaintext once and stores only its SHA-256 hash; `authenticate()` matches the
+  hash and checks expiry; `revoke()` by id. For long-lived API credentials where you own the database.
+
+Abilities are plain strings with no built-in vocabulary — you define `room:*`, `post`, `api:read`, …
+and the same language works across signed tokens, PATs, and gates.
 
 ## Boundaries (contracts)
 

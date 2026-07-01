@@ -4,6 +4,25 @@ Notable changes to cpp-laravel. Versioning is semantic; a passing test suite
 (`ctest`) is the release gate. Depend on a tag and upgrade deliberately — see
 [`docs/consuming.md`](docs/consuming.md).
 
+## [0.6.0] — 2026-07-01
+
+WebSocket binary frames + a terminal bridge — a browser terminal (a CoCo/BBS-style
+client) dialing in over WebSocket and rendering a byte stream. Additive.
+
+### Added
+- `ws::encode_binary` / `Connection::send_binary` / `Hub::broadcast_binary` — binary
+  WebSocket frames, for raw byte streams (ANSI/CP437 output isn't valid UTF-8, so it
+  can't ride in a text frame). Handles all RFC 6455 length forms.
+- `ws::run_terminal(conn, on_input)` — pumps a connection as a byte terminal: forwards
+  each inbound message to `on_input` (which can write back via `send_binary`) until the
+  peer closes. A live backend can also push output from another thread.
+- `examples/coco-web`: a `WS /terminal` endpoint + `public/terminal.html` — a minimal
+  browser terminal over the WebSocket layer.
+
+### Docs
+- README (dev + public): new "HTTP, routing & static serving" and "Auth, sessions &
+  tokens" sections covering the v0.2.0–v0.6.0 additions.
+
 ## [0.5.0] — 2026-07-01
 
 ### Added

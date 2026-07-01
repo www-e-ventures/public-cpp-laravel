@@ -23,6 +23,7 @@
 #include <unistd.h>
 
 #include <cctype>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -79,6 +80,15 @@ public:
     bool send_text(const std::string& payload) {
         std::lock_guard<std::mutex> lock(send_mutex_);
         return send_all(encode_text(payload));
+    }
+
+    // Send one binary frame — for raw byte streams (e.g. a terminal's ANSI/CP437
+    // output, which isn't valid UTF-8 and so can't ride in a text frame). Thread-safe
+    // with respect to other sends, so a backend thread can push output while the
+    // owning thread is parked in receive().
+    bool send_binary(const std::string& bytes) {
+        std::lock_guard<std::mutex> lock(send_mutex_);
+        return send_all(encode_binary(bytes));
     }
 
     // Block for the next complete text/binary message, reassembling one that was
@@ -181,6 +191,10 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         for (Connection* c : conns_) c->send_text(text);
     }
+    void broadcast_binary(const std::string& bytes) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (Connection* c : conns_) c->send_binary(bytes);
+    }
     std::size_t size() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return conns_.size();
@@ -190,5 +204,17 @@ private:
     mutable std::mutex mutex_;
     std::set<Connection*> conns_;
 };
+
+// Bridge a connection as a byte "terminal": forward each inbound message (browser
+// keystrokes / lines) to `on_input`, which is handed the connection so it can write
+// output back with send_binary(). Blocks until the peer closes or the socket errors,
+// then returns. This is the browser-terminal shape — a CoCo/BBS-style client dialing
+// in over WebSocket and rendering the byte stream. For a backend that emits output
+// unprompted (a live BBS/PTY, not just echo), push from another thread with
+// conn.send_binary() while this loop reads input; sends are serialised.
+inline void run_terminal(Connection& conn,
+                         const std::function<void(Connection&, const std::string&)>& on_input) {
+    while (auto msg = conn.receive()) on_input(conn, *msg);
+}
 
 } // namespace ws

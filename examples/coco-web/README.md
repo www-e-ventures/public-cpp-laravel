@@ -11,6 +11,10 @@ it exercises two framework features end to end:
 - **Token-gated writes** (`token.hpp`) — `POST /api/items` requires a signed token
   carrying the `items:write` ability; `tok::requires_ability` verifies it with a
   shared secret and no database lookup.
+- **WebSocket terminal** (`websocket_server.hpp`) — `WS /terminal` streams a byte
+  terminal to the browser (binary frames) and echoes input; open
+  `/assets/terminal.html`. This is the shape a retro client (a CoCo terminal dialing
+  into a BBS) takes — the backend would push ANSI/CP437 bytes here.
 
 Plus a small ORM-backed JSON API (`GET /api/items`, with `?limit=N`).
 
