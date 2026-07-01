@@ -43,6 +43,18 @@ TEST(router_contract_supports_put_patch_delete) {
     CHECK(!router.match(req("GET", "/articles/7")).has_value()); // no GET registered
 }
 
+TEST(router_contract_catch_all_matches_nested_paths) {
+    Router concrete;
+    RouterContract& router = concrete;
+    router.get("/dist/{path*}", [](Request&) { return Response{200, "static"}; });
+    router.get("/u/{id}", [](Request&) { return Response{200, "u"}; });
+
+    auto m = router.match(req("GET", "/dist/js/app.wasm"));
+    CHECK(m.has_value());
+    CHECK_EQ(m->second.at("path"), std::string("js/app.wasm")); // captured incl. slashes
+    CHECK(!router.match(req("GET", "/u/a/b")).has_value());      // {id} is one segment only
+}
+
 TEST(router_contract_list_reports_registered_routes) {
     Router concrete;
     RouterContract& router = concrete;

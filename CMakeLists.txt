@@ -76,6 +76,7 @@ if(PROJECT_IS_TOP_LEVEL)
         tests/run_main.cpp
         tests/test_autowire.cpp
         tests/test_http_server.cpp
+        tests/test_static_files.cpp
         tests/test_container_contract.cpp
         tests/test_container_advanced.cpp
         tests/test_router_contract.cpp
@@ -109,6 +110,10 @@ if(PROJECT_IS_TOP_LEVEL)
         add_executable(test_websocket tests/test_websocket.cpp)
         target_link_libraries(test_websocket PRIVATE framework OpenSSL::Crypto)
         add_test(NAME websocket COMMAND test_websocket)
+
+        add_executable(test_tokens tests/test_tokens.cpp)
+        target_link_libraries(test_tokens PRIVATE framework OpenSSL::Crypto)
+        add_test(NAME tokens COMMAND test_tokens)
     else()
         message(STATUS "OpenSSL not found — skipping PBKDF2 hasher (install libssl-dev)")
     endif()

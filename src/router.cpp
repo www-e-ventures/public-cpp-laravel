@@ -5,14 +5,16 @@ void Router::add(const std::string& method, const std::string& uri, Handler h,
                  std::vector<Middleware> mw) {
     std::vector<std::string> names;
     std::string rx = "^";
-    std::regex seg(R"(\{(\w+)\})");
+    std::regex seg(R"(\{(\w+)(\*?)\})");
     auto begin = std::sregex_iterator(uri.begin(), uri.end(), seg);
     auto end = std::sregex_iterator();
     std::size_t last = 0;
     for (auto it = begin; it != end; ++it) {
         auto m = *it;
         rx += escape(uri.substr(last, m.position() - last));
-        rx += "([^/]+)";
+        // {name} matches one path segment; {name*} is a catch-all (matches '/' too),
+        // e.g. static file prefixes like /dist/{path*}.
+        rx += (m[2].str() == "*") ? "(.*)" : "([^/]+)";
         names.push_back(m[1].str());
         last = m.position() + m.length();
     }
