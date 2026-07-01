@@ -4,6 +4,14 @@ Notable changes to cpp-laravel. Versioning is semantic; a passing test suite
 (`ctest`) is the release gate. Depend on a tag and upgrade deliberately — see
 [`docs/consuming.md`](docs/consuming.md).
 
+## [0.5.0] — 2026-07-01
+
+### Added
+- `examples/coco-web/` — a minimal reference app: a static SPA served by the framework
+  alongside a JSON API over the ORM, with a token-gated write route. Exercises static
+  serving (v0.3.0) and the identity toolkit (v0.4.0) end to end — the shape an outside
+  app takes when it FetchContents the framework. Needs OpenSSL; skipped otherwise.
+
 ## [0.4.0] — 2026-07-01
 
 Identity toolkit (opt-in, OpenSSL-gated) — stateless signed tokens and hashed

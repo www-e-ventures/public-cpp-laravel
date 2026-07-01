@@ -166,6 +166,7 @@ if(PROJECT_IS_TOP_LEVEL)
         message(STATUS "libclang not found — skipping codegen tools (install libclang-dev)")
     endif()
 
-    # ── The example application (its own project under examples/blog) ──
+    # ── The example applications (each its own project under examples/) ──
     add_subdirectory(examples/blog)
+    add_subdirectory(examples/coco-web)
 endif()
