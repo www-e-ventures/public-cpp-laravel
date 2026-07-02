@@ -78,10 +78,14 @@ inline int run_all() {
         if (!(cond)) ::test::report_failure(#cond, __FILE__, __LINE__, __fails); \
     } while (0)
 
+// Operands are copied into locals on purpose: binding a reference here would
+// dangle when the operand reaches into a temporary (e.g. repo.find(id)->title —
+// operator-> gets no lifetime extension, and -O2 builds turn that into a real
+// dangling read that -Wdangling-pointer rejects under -Werror).
 #define CHECK_EQ(a, b)                                                 \
     do {                                                               \
-        auto&& __a = (a);                                              \
-        auto&& __b = (b);                                              \
+        auto __a = (a);                                                \
+        auto __b = (b);                                                \
         if (!(__a == __b))                                             \
             ::test::report_eq_failure(#a, #b, __a, __b, __FILE__, __LINE__, __fails); \
     } while (0)

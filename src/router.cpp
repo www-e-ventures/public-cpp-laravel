@@ -37,6 +37,23 @@ Router::match(const Request& req) const {
     return std::nullopt;
 }
 
+std::vector<std::string> Router::allowed_methods(const std::string& path) const {
+    std::vector<std::string> out;
+    for (const auto& r : routes_) {
+        std::smatch m;
+        if (!std::regex_match(path, m, r.pattern)) continue;
+        bool seen = false;
+        for (const auto& v : out) {
+            if (v == r.method) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) out.push_back(r.method);
+    }
+    return out;
+}
+
 std::vector<RouteInfo> Router::list() const {
     std::vector<RouteInfo> out;
     out.reserve(routes_.size());

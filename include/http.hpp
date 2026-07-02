@@ -16,6 +16,10 @@ struct Request {
     // list cookies) still compile cleanly under -Wmissing-field-initializers.
     std::unordered_map<std::string, std::string> cookies{}; // {lwsid => ...}
     std::unordered_map<std::string, std::string> query{};   // {page => 2} from ?page=2
+    // Peer IP as HttpServer accepted it ("127.0.0.1"), for rate limiting / logging.
+    // Empty when the request didn't come through a socket (tests, FFI/WASM hosts).
+    // Behind a reverse proxy this is the proxy — consult X-Forwarded-For yourself.
+    std::string remote_addr{};
 };
 
 // Outbound response. Defaults to a 200 text/plain body.

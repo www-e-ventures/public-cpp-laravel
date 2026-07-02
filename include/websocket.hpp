@@ -128,11 +128,18 @@ struct Frame {
     Opcode opcode = Opcode::Text;
     std::string payload;
     bool fin = false;           // FIN bit: the last frame of a (maybe fragmented) message
+    bool masked = false;        // the mask bit — RFC 6455 requires it on client frames
     bool ok = false;            // a complete frame was parsed out of the buffer
+    bool too_big = false;       // declared length exceeds the caller's max_payload cap
     std::size_t consumed = 0;   // bytes the frame occupied at the front of `buf`
 };
 
-inline Frame parse_frame(const std::string& buf) {
+// `max_payload` caps the frame's DECLARED length: a header announcing more than
+// the cap sets `too_big` immediately — before the payload arrives — so a server
+// can refuse (Close 1009) instead of buffering an attacker-chosen number of bytes.
+// The default cap is "no cap", which keeps pure decode tests/tools unaffected.
+inline Frame parse_frame(const std::string& buf,
+                         std::uint64_t max_payload = UINT64_MAX) {
     Frame f;
     if (buf.size() < 2) return f; // need at least the two-byte header
     auto byte = [&](std::size_t k) { return static_cast<unsigned char>(buf[k]); };
@@ -140,6 +147,7 @@ inline Frame parse_frame(const std::string& buf) {
     f.fin = (byte(0) & 0x80) != 0;
     f.opcode = static_cast<Opcode>(byte(0) & 0x0F);
     bool masked = (byte(1) & 0x80) != 0;
+    f.masked = masked;
     std::uint64_t len = byte(1) & 0x7F;
     std::size_t i = 2;
     if (len == 126) {
@@ -151,6 +159,10 @@ inline Frame parse_frame(const std::string& buf) {
         len = 0;
         for (int k = 0; k < 8; ++k) len = (len << 8) | byte(2 + static_cast<std::size_t>(k));
         i = 10;
+    }
+    if (len > max_payload) {
+        f.too_big = true;
+        return f;
     }
     unsigned char mask[4] = {0, 0, 0, 0};
     if (masked) {
@@ -173,6 +185,15 @@ inline Frame parse_frame(const std::string& buf) {
 // A server->client close frame (FIN + Close opcode, empty payload, unmasked).
 inline std::string encode_close() {
     return std::string{static_cast<char>(0x88), static_cast<char>(0x00)};
+}
+
+// A close frame carrying an RFC 6455 status code (big-endian, 2-byte payload) —
+// 1002 protocol error, 1009 message too big, or an echo of the peer's own code.
+inline std::string encode_close(std::uint16_t code) {
+    std::string f{static_cast<char>(0x88), static_cast<char>(0x02)};
+    f.push_back(static_cast<char>((code >> 8) & 0xFF));
+    f.push_back(static_cast<char>(code & 0xFF));
+    return f;
 }
 
 // A server->client Pong echoing a Ping's payload (payloads are <= 125 by spec).

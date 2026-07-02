@@ -63,6 +63,18 @@ public:
     Connection(const Connection&) = delete;
     Connection& operator=(const Connection&) = delete;
 
+    // Cap on a single (possibly fragmented) inbound message. A frame header
+    // declaring more, or fragments accumulating past it, closes with 1009 —
+    // BEFORE the payload is buffered, so a client can't OOM the server by
+    // announcing a huge length. Default 1 MiB: generous for the terminal/chat
+    // shapes this layer serves; raise it per-connection if an app streams more.
+    void set_max_message_bytes(std::size_t n) { max_message_bytes_ = n; }
+
+    // RFC 6455 §5.1: client->server frames MUST be masked; an unmasked one is a
+    // protocol error (Close 1002). On by default — turn off only for a peer that
+    // is another server (or a test harness) speaking unmasked by agreement.
+    void set_require_masked(bool on) { require_masked_ = on; }
+
     // Complete the RFC 6455 handshake: reply 101 with the computed accept key.
     // Returns false if the request had no Sec-WebSocket-Key or the write failed.
     bool handshake() {
@@ -102,18 +114,34 @@ public:
         std::string message;       // accumulates a fragmented message's payload
         bool fragmenting = false;  // a data frame with FIN=0 opened a message
         for (;;) {
-            Frame f = parse_frame(buf_);
-            while (!f.ok) {
+            Frame f = parse_frame(buf_, max_message_bytes_);
+            while (!f.ok && !f.too_big) {
                 char tmp[4096];
                 ssize_t n = ::recv(fd_, tmp, sizeof(tmp), 0);
                 if (n <= 0) return std::nullopt;
                 buf_.append(tmp, static_cast<std::size_t>(n));
-                f = parse_frame(buf_);
+                f = parse_frame(buf_, max_message_bytes_);
+            }
+            if (f.too_big) {  // refused off the header — payload never buffered
+                send_control(encode_close(1009));
+                return std::nullopt;
+            }
+            if (require_masked_ && !f.masked) {  // RFC 6455 §5.1 violation
+                send_control(encode_close(1002));
+                return std::nullopt;
             }
             buf_.erase(0, f.consumed);
             switch (f.opcode) {
                 case Opcode::Close:
-                    send_control(encode_close());
+                    // Echo the peer's status code back (RFC 6455 §5.5.1); a
+                    // codeless close gets a codeless echo.
+                    if (f.payload.size() >= 2) {
+                        auto hi = static_cast<unsigned char>(f.payload[0]);
+                        auto lo = static_cast<unsigned char>(f.payload[1]);
+                        send_control(encode_close(static_cast<std::uint16_t>((hi << 8) | lo)));
+                    } else {
+                        send_control(encode_close());
+                    }
                     return std::nullopt;
                 case Opcode::Ping:
                     // Control frames may sit between data fragments; answering one
@@ -125,7 +153,7 @@ public:
                 case Opcode::Text:
                 case Opcode::Binary:
                     if (fragmenting) {  // a new message before the last one finished
-                        send_control(encode_close());
+                        send_control(encode_close(1002));
                         return std::nullopt;
                     }
                     if (f.fin) return f.payload;  // whole message in a single frame
@@ -134,7 +162,12 @@ public:
                     continue;
                 case Opcode::Continuation:
                     if (!fragmenting) {  // continuation with no message in progress
-                        send_control(encode_close());
+                        send_control(encode_close(1002));
+                        return std::nullopt;
+                    }
+                    // Each fragment fits the cap on its own; their SUM must too.
+                    if (message.size() + f.payload.size() > max_message_bytes_) {
+                        send_control(encode_close(1009));
                         return std::nullopt;
                     }
                     message += f.payload;
@@ -172,6 +205,8 @@ private:
     std::string client_key_;
     std::string buf_;        // unconsumed bytes read from the socket
     std::mutex send_mutex_;  // serialises writes (owner thread + Hub broadcasts)
+    std::size_t max_message_bytes_ = 1024 * 1024;
+    bool require_masked_ = true;
 };
 
 // A thread-safe registry of open connections — the fan-out point for

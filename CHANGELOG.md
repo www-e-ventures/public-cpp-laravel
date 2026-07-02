@@ -4,6 +4,49 @@ Notable changes to cpp-laravel. Versioning is semantic; a passing test suite
 (`ctest`) is the release gate. Depend on a tag and upgrade deliberately — see
 [`docs/consuming.md`](docs/consuming.md).
 
+## [0.7.0] — 2026-07-01
+
+"The server survives" — robustness hardening for the HTTP and WebSocket layers.
+Additive: new limits have permissive defaults; existing routes and consumers are
+unaffected unless they were relying on a bug.
+
+### Added
+- **Exception containment.** A throw escaping a handler/middleware (a bad
+  `std::stoi`, a container miss, a DB error) is now caught — in `Kernel::handle`
+  and, belt-and-braces, in the server's dispatch — logged to stderr, and answered
+  as a plain `500`. Previously it propagated out of the worker thread and
+  `std::terminate`d the whole multi-worker server.
+- **Request limits** — `HttpServer::Limits` (`set_limits()` before `serve()`):
+  `max_header_bytes` (default 64 KiB → `431`), `max_body_bytes` (default 16 MiB,
+  refused off the declared Content-Length before buffering → `413`), and
+  `read_timeout_seconds` (default 30 s; a stalled/trickling read releases the
+  worker; cleared before a WebSocket handler takes the socket).
+- **`405 Method Not Allowed`.** A path registered under other verbs now answers
+  `405` with an `Allow` header instead of a misleading `404`. New
+  `RouterContract::allowed_methods(path)` (virtual with a default, so custom
+  routers keep compiling) backs it.
+- **`Request.remote_addr`** — the peer IP as accepted, for IP-keyed rate limiting
+  and access logging. Empty off-socket (tests, FFI/WASM hosts).
+- **WebSocket message-size cap.** `Connection::set_max_message_bytes()` (default
+  1 MiB): a frame header declaring more closes with `1009` before the payload is
+  ever buffered (previously an attacker-declared 64-bit length drove a
+  `reserve()`/unbounded buffering); fragments that sum past the cap also `1009`.
+  `parse_frame(buf, max_payload)` exposes the same check (`Frame.too_big`).
+- **WebSocket protocol hygiene.** Unmasked client frames are rejected with `1002`
+  per RFC 6455 §5.1 (`set_require_masked(false)` to opt out for server-to-server
+  peers); a peer's Close status code is echoed back (was: always an empty Close);
+  protocol-error closes now carry `1002`. `ws::encode_close(code)` added;
+  `Frame.masked` exposed.
+- **HTTP parsing correctness.** `Content-Length` is matched case-insensitively at
+  header-line starts (`parse_content_length()`); `Transfer-Encoding: chunked` is
+  answered with `411 Length Required` instead of hanging on a length that never
+  comes (`has_chunked_body()`). New reason phrases: 400/405/411/413/431.
+- **`check.sh`** — the release gate script: builds default AND Release under
+  `-Wall -Wextra -Werror` and runs the suite in both. (An optimized GCC 13 build
+  caught a real dangling-temporary in a `CHECK_EQ` on `repo.find(id)->title`; the
+  harness macro now copies its operands, and Release is part of the gate so the
+  class stays fixed.)
+
 ## [0.6.0] — 2026-07-01
 
 WebSocket binary frames + a terminal bridge — a browser terminal (a CoCo/BBS-style

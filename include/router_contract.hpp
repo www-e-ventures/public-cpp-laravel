@@ -42,6 +42,15 @@ public:
 
     virtual std::vector<RouteInfo> list() const = 0;
 
+    // The methods that DO have a route for `path` — the kernel's 404-vs-405 probe
+    // (405 answers with these in the Allow header). Virtual with a default (not
+    // pure) so existing RouterContract implementations keep compiling; the default
+    // "no methods" means such routers simply keep answering 404.
+    virtual std::vector<std::string> allowed_methods(const std::string& path) const {
+        (void)path;
+        return {};
+    }
+
     // Convenience verbs shared by every router.
     void get(const std::string& uri, Handler h, std::vector<Middleware> mw = {}) {
         add("GET", uri, std::move(h), std::move(mw));

@@ -24,6 +24,8 @@ public:
 
     std::vector<RouteInfo> list() const override;
 
+    std::vector<std::string> allowed_methods(const std::string& path) const override;
+
 private:
     static std::string escape(const std::string& s);
     std::vector<Route> routes_;

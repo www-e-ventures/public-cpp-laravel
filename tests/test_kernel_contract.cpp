@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <regex>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -73,4 +74,53 @@ TEST(kernel_applies_global_middleware) {
     Response r = kernel.handle(Request{"GET", "/x", {}, {}, ""});
     CHECK_EQ(r.status, 403);
     CHECK_EQ(r.body, std::string("blocked"));
+}
+
+namespace {
+
+// A fake whose match() misses but which reports other verbs for the path —
+// the kernel must turn that into a 405 with an Allow header.
+class MethodAwareFakeRouter : public FakeRouter {
+public:
+    std::vector<std::string> allowed_methods(const std::string&) const override {
+        return {"POST", "DELETE"};
+    }
+};
+
+} // namespace
+
+TEST(kernel_returns_405_when_path_matches_under_other_verbs) {
+    auto fake = std::make_shared<MethodAwareFakeRouter>();
+    fake->will_not_match();
+    Kernel kernel(std::make_shared<Container>(), fake);
+
+    Response r = kernel.handle(Request{"GET", "/articles/1", {}, {}, ""});
+    CHECK_EQ(r.status, 405);
+    CHECK_EQ(r.headers.at("Allow"), std::string("POST, DELETE"));
+}
+
+TEST(kernel_converts_handler_exception_to_500) {
+    auto fake = std::make_shared<FakeRouter>();
+    fake->will_match(route_with([](Request&) -> Response {
+        throw std::runtime_error("handler blew up");
+    }));
+    Kernel kernel(std::make_shared<Container>(), fake);
+
+    // Must not propagate (on the threaded server an escaped throw terminates the
+    // process); the client gets a plain 500 with no exception details.
+    Response r = kernel.handle(Request{"GET", "/x", {}, {}, ""});
+    CHECK_EQ(r.status, 500);
+    CHECK(r.body.find("blew up") == std::string::npos);
+}
+
+TEST(kernel_converts_middleware_exception_to_500) {
+    auto fake = std::make_shared<FakeRouter>();
+    fake->will_match(route_with([](Request&) { return Response{200, "ok"}; }));
+    Kernel kernel(std::make_shared<Container>(), fake);
+    kernel.global_middleware({[](Request&, Next) -> Response {
+        throw std::runtime_error("middleware blew up");
+    }});
+
+    Response r = kernel.handle(Request{"GET", "/x", {}, {}, ""});
+    CHECK_EQ(r.status, 500);
 }

@@ -357,3 +357,168 @@ TEST(websocket_run_terminal_echoes_input_as_binary) {
 }
 
 int main() { return RUN_ALL_TESTS(); }
+
+// --- Size caps, masking enforcement, close-code echo (v0.7.0 hardening) ------
+
+TEST(websocket_parse_frame_flags_oversized_declared_length) {
+    // Only the HEADER of a huge frame arrives; the declared length alone must
+    // trip the cap — the server refuses before buffering any payload.
+    std::string header;
+    header.push_back(static_cast<char>(0x82));        // FIN + binary
+    header.push_back(static_cast<char>(0x80 | 127));  // masked + 64-bit length form
+    for (int i = 7; i >= 0; --i)                      // declared length: 1 GiB
+        header.push_back(static_cast<char>((static_cast<std::uint64_t>(1 << 30) >> (i * 8)) & 0xFF));
+
+    ws::Frame f = ws::parse_frame(header, /*max_payload=*/1024 * 1024);
+    CHECK(!f.ok);
+    CHECK(f.too_big);
+
+    // Without a cap the same header just reads as incomplete, as before.
+    ws::Frame g = ws::parse_frame(header);
+    CHECK(!g.ok);
+    CHECK(!g.too_big);
+}
+
+TEST(websocket_parse_frame_reports_mask_bit) {
+    ws::Frame client = ws::parse_frame(masked_frame(0x1, "hi"));
+    CHECK(client.ok);
+    CHECK(client.masked);
+    ws::Frame server = ws::parse_frame(ws::encode_text("hi")); // server frames unmasked
+    CHECK(server.ok);
+    CHECK(!server.masked);
+}
+
+TEST(websocket_encode_close_with_status_code) {
+    std::string c = ws::encode_close(1009);
+    CHECK_EQ(static_cast<unsigned char>(c[0]), 0x88); // FIN + Close
+    CHECK_EQ(static_cast<unsigned char>(c[1]), 0x02); // 2-byte payload
+    CHECK_EQ(static_cast<unsigned char>(c[2]), 0x03); // 1009 >> 8
+    CHECK_EQ(static_cast<unsigned char>(c[3]), 0xF1); // 1009 & 0xFF
+}
+
+TEST(websocket_connection_closes_1009_on_oversized_message) {
+    int sv[2];
+    CHECK(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    Request req;
+    req.headers["Sec-WebSocket-Key"] = "dGhlIHNhbXBsZSBub25jZQ==";
+    ws::Connection conn(sv[0], req);
+    CHECK(conn.handshake());
+    char buf[512];
+    ::recv(sv[1], buf, sizeof(buf), 0); // drain the 101
+
+    conn.set_max_message_bytes(8);
+    std::string big = masked_frame(0x2, "0123456789"); // 10 > 8
+    ::send(sv[1], big.data(), big.size(), 0);
+    CHECK(!conn.receive().has_value());
+
+    ssize_t n = ::recv(sv[1], buf, sizeof(buf), 0);
+    CHECK(n >= 4);
+    CHECK_EQ(static_cast<unsigned char>(buf[0]), 0x88); // Close
+    CHECK_EQ((static_cast<unsigned char>(buf[2]) << 8) | static_cast<unsigned char>(buf[3]),
+             1009); // Message Too Big
+
+    conn.close();
+    ::close(sv[1]);
+}
+
+TEST(websocket_connection_closes_1009_when_fragments_sum_past_cap) {
+    int sv[2];
+    CHECK(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    Request req;
+    req.headers["Sec-WebSocket-Key"] = "dGhlIHNhbXBsZSBub25jZQ==";
+    ws::Connection conn(sv[0], req);
+    CHECK(conn.handshake());
+    char buf[512];
+    ::recv(sv[1], buf, sizeof(buf), 0); // drain the 101
+
+    // Each fragment fits the 8-byte cap on its own; together they exceed it.
+    conn.set_max_message_bytes(8);
+    std::string a = masked_frame(0x1, "01234", false);
+    std::string b = masked_frame(0x0, "56789", true);
+    ::send(sv[1], a.data(), a.size(), 0);
+    ::send(sv[1], b.data(), b.size(), 0);
+    CHECK(!conn.receive().has_value());
+
+    ssize_t n = ::recv(sv[1], buf, sizeof(buf), 0);
+    CHECK(n >= 4);
+    CHECK_EQ(static_cast<unsigned char>(buf[0]), 0x88);
+    CHECK_EQ((static_cast<unsigned char>(buf[2]) << 8) | static_cast<unsigned char>(buf[3]),
+             1009);
+
+    conn.close();
+    ::close(sv[1]);
+}
+
+TEST(websocket_connection_rejects_unmasked_client_frame) {
+    int sv[2];
+    CHECK(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    Request req;
+    req.headers["Sec-WebSocket-Key"] = "dGhlIHNhbXBsZSBub25jZQ==";
+    ws::Connection conn(sv[0], req);
+    CHECK(conn.handshake());
+    char buf[512];
+    ::recv(sv[1], buf, sizeof(buf), 0); // drain the 101
+
+    // A client MUST mask (RFC 6455 §5.1); an unmasked data frame is a protocol
+    // error and the server closes with 1002.
+    std::string unmasked = ws::encode_text("cheeky");
+    ::send(sv[1], unmasked.data(), unmasked.size(), 0);
+    CHECK(!conn.receive().has_value());
+
+    ssize_t n = ::recv(sv[1], buf, sizeof(buf), 0);
+    CHECK(n >= 4);
+    CHECK_EQ(static_cast<unsigned char>(buf[0]), 0x88);
+    CHECK_EQ((static_cast<unsigned char>(buf[2]) << 8) | static_cast<unsigned char>(buf[3]),
+             1002); // Protocol Error
+
+    conn.close();
+    ::close(sv[1]);
+}
+
+TEST(websocket_connection_accepts_unmasked_when_opted_out) {
+    int sv[2];
+    CHECK(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    Request req;
+    req.headers["Sec-WebSocket-Key"] = "dGhlIHNhbXBsZSBub25jZQ==";
+    ws::Connection conn(sv[0], req);
+    CHECK(conn.handshake());
+    char buf[512];
+    ::recv(sv[1], buf, sizeof(buf), 0); // drain the 101
+
+    conn.set_require_masked(false); // server-to-server / test-harness peers
+    std::string unmasked = ws::encode_text("fine");
+    ::send(sv[1], unmasked.data(), unmasked.size(), 0);
+    auto msg = conn.receive();
+    CHECK(msg.has_value());
+    CHECK_EQ(*msg, std::string("fine"));
+
+    conn.close();
+    ::close(sv[1]);
+}
+
+TEST(websocket_connection_echoes_peer_close_code) {
+    int sv[2];
+    CHECK(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    Request req;
+    req.headers["Sec-WebSocket-Key"] = "dGhlIHNhbXBsZSBub25jZQ==";
+    ws::Connection conn(sv[0], req);
+    CHECK(conn.handshake());
+    char buf[512];
+    ::recv(sv[1], buf, sizeof(buf), 0); // drain the 101
+
+    // Peer closes with 1000 (normal); the reply must carry 1000 back, not be empty.
+    std::string payload{static_cast<char>(0x03), static_cast<char>(0xE8)}; // 1000
+    std::string close = masked_frame(0x8, payload);
+    ::send(sv[1], close.data(), close.size(), 0);
+    CHECK(!conn.receive().has_value());
+
+    ssize_t n = ::recv(sv[1], buf, sizeof(buf), 0);
+    CHECK(n >= 4);
+    CHECK_EQ(static_cast<unsigned char>(buf[0]), 0x88);
+    CHECK_EQ(static_cast<unsigned char>(buf[1]), 0x02);
+    CHECK_EQ((static_cast<unsigned char>(buf[2]) << 8) | static_cast<unsigned char>(buf[3]),
+             1000);
+
+    conn.close();
+    ::close(sv[1]);
+}

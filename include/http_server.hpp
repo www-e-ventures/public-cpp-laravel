@@ -2,10 +2,14 @@
 //
 // Bridges real sockets to the Kernel: read a request, Kernel::handle it, write the
 // response. Parsing/formatting are pure functions (unit-tested in test_http_server)
-// so the only untested part is the thin socket loop. Single-threaded, Connection:
-// close — enough to reach the app from curl/a browser, not a production server.
+// so the only untested part is the thin socket loop. Blocking, Connection: close,
+// optionally multi-worker — sized for an admin dashboard / JSON API, not a hostile
+// internet edge (run one behind a reverse proxy). A worker survives a throwing
+// handler (500), refuses oversized requests (413/431), and times out a stalled
+// read, so one bad client can't take the process or a worker hostage.
 #pragma once
 #include <atomic>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -21,10 +25,31 @@ std::optional<Request> parse_http_request(const std::string& raw);
 // Serialise a Response as an HTTP/1.1 message (sets Content-Length, Connection: close).
 std::string format_http_response(const Response& res);
 
+// Case-insensitive Content-Length from a raw header block ("Content-length: 42" is
+// as valid as the canonical casing). nullopt when the header is absent/unparseable.
+std::optional<std::size_t> parse_content_length(const std::string& head);
+
+// True if the header block declares Transfer-Encoding: chunked. The server doesn't
+// speak chunked (bodies are read by Content-Length); it answers 411 instead of
+// hanging waiting for a length that will never come.
+bool has_chunked_body(const std::string& head);
+
 class HttpServer {
 public:
+    // Per-request ceilings. Defaults suit the real consumers (form posts, JSON,
+    // save-state blobs of a few MB) with headroom; raise/lower via set_limits()
+    // BEFORE serve(). A zero read_timeout_seconds disables the timeout.
+    struct Limits {
+        std::size_t max_header_bytes = 64 * 1024;        // breach → 431, close
+        std::size_t max_body_bytes = 16 * 1024 * 1024;   // breach → 413, close
+        int read_timeout_seconds = 30;                   // stalled read → close
+    };
+
     HttpServer(std::shared_ptr<KernelContract> kernel, int port)
         : kernel_(std::move(kernel)), port_(port) {}
+
+    void set_limits(Limits limits) { limits_ = limits; }
+    const Limits& limits() const { return limits_; }
 
     // Blocks serving requests until the process is killed. Returns nonzero on a
     // socket setup failure (bind/listen). With workers > 1, runs a thread pool —
@@ -52,10 +77,11 @@ public:
 
 private:
     void accept_loop(int server_fd);
-    void handle_client(int client_fd);
+    void handle_client(int client_fd, const std::string& remote_addr);
 
     std::shared_ptr<KernelContract> kernel_;
     int port_;
+    Limits limits_{};
     std::unordered_map<std::string, WebSocketHandler> ws_handlers_;
     std::atomic<bool> running_{false};
     std::atomic<int> server_fd_{-1};

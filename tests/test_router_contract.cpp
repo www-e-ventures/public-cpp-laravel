@@ -68,3 +68,34 @@ TEST(router_contract_list_reports_registered_routes) {
     CHECK_EQ(routes[0].uri, std::string("/health"));
     CHECK_EQ(routes[1].method, std::string("POST"));
 }
+
+TEST(router_contract_allowed_methods_for_a_known_path) {
+    Router concrete;
+    RouterContract& router = concrete;
+
+    router.get("/articles/{id}", [](Request&) { return Response{200, ""}; });
+    router.put("/articles/{id}", [](Request&) { return Response{200, ""}; });
+    router.del("/articles/{id}", [](Request&) { return Response{200, ""}; });
+    router.get("/health", [](Request&) { return Response{200, ""}; });
+
+    auto allowed = router.allowed_methods("/articles/42");
+    CHECK_EQ(allowed.size(), static_cast<std::size_t>(3)); // GET, PUT, DELETE
+    CHECK_EQ(allowed[0], std::string("GET"));
+    CHECK_EQ(allowed[1], std::string("PUT"));
+    CHECK_EQ(allowed[2], std::string("DELETE"));
+
+    CHECK(router.allowed_methods("/nowhere").empty()); // unknown path stays a 404
+}
+
+TEST(router_contract_allowed_methods_deduplicates) {
+    Router concrete;
+    RouterContract& router = concrete;
+
+    // Two GET routes whose patterns both match the same path must report GET once.
+    router.get("/a/{x}", [](Request&) { return Response{200, ""}; });
+    router.get("/a/{y*}", [](Request&) { return Response{200, ""}; });
+
+    auto allowed = router.allowed_methods("/a/1");
+    CHECK_EQ(allowed.size(), static_cast<std::size_t>(1));
+    CHECK_EQ(allowed[0], std::string("GET"));
+}

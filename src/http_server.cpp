@@ -4,9 +4,11 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include <cctype>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -21,11 +23,16 @@ std::string reason_phrase(int status) {
         case 201: return "Created";
         case 206: return "Partial Content";
         case 304: return "Not Modified";
+        case 400: return "Bad Request";
         case 401: return "Unauthorized";
         case 403: return "Forbidden";
         case 404: return "Not Found";
+        case 405: return "Method Not Allowed";
+        case 411: return "Length Required";
+        case 413: return "Payload Too Large";
         case 416: return "Range Not Satisfiable";
         case 422: return "Unprocessable Entity";
+        case 431: return "Request Header Fields Too Large";
         case 500: return "Internal Server Error";
         default:  return "OK";
     }
@@ -39,7 +46,42 @@ std::string trim(const std::string& s) {
     return s.substr(b, e - b + 1);
 }
 
+// Lower-case copy — header names (and the tokens in their values) compare
+// case-insensitively per RFC 9110.
+std::string lower(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+// The value of header `name_lower` in a raw header block, or nullopt. Matches at
+// line starts only ("\r\nname:"), so a value can't spoof a later header.
+std::optional<std::string> header_value(const std::string& head, const std::string& name_lower) {
+    std::string h = lower(head);
+    std::string needle = "\r\n" + name_lower + ":";
+    auto pos = h.find(needle);
+    if (pos == std::string::npos) return std::nullopt;
+    auto vstart = pos + needle.size();
+    auto eol = head.find("\r\n", vstart);
+    return trim(head.substr(vstart, eol == std::string::npos ? std::string::npos : eol - vstart));
+}
+
 } // namespace
+
+std::optional<std::size_t> parse_content_length(const std::string& head) {
+    auto v = header_value(head, "content-length");
+    if (!v || v->empty()) return std::nullopt;
+    for (char c : *v)
+        if (c < '0' || c > '9') return std::nullopt;
+    errno = 0;
+    unsigned long long n = std::strtoull(v->c_str(), nullptr, 10);
+    if (errno != 0) return std::nullopt;
+    return static_cast<std::size_t>(n);
+}
+
+bool has_chunked_body(const std::string& head) {
+    auto v = header_value(head, "transfer-encoding");
+    return v && lower(*v).find("chunked") != std::string::npos;
+}
 
 std::optional<Request> parse_http_request(const std::string& raw) {
     auto header_end = raw.find("\r\n\r\n");
@@ -90,9 +132,26 @@ std::string format_http_response(const Response& res) {
 
 namespace {
 
-// Read a full request: headers, then Content-Length bytes of body.
-std::string read_request(int fd) {
+// Outcome of reading one request off the wire. Anything but Ok short-circuits the
+// request cycle: the caller answers with the paired status (or, for Closed, just
+// hangs up — there's nobody left to answer, or nothing parseable to answer to).
+struct ReadResult {
+    enum class Status {
+        Ok,
+        Closed,         // peer went away / read timed out / empty read
+        HeaderTooLarge, // headers never ended within max_header_bytes → 431
+        BodyTooLarge,   // declared Content-Length over max_body_bytes → 413
+        LengthRequired, // Transfer-Encoding: chunked (we read by length only) → 411
+    };
+    Status status = Status::Closed;
     std::string data;
+};
+
+// Read a full request: headers, then Content-Length bytes of body, enforcing the
+// server's limits while reading (an oversized request is refused as soon as its
+// header block says so — not after buffering it).
+ReadResult read_request(int fd, const HttpServer::Limits& limits) {
+    ReadResult out;
     char buf[4096];
     std::size_t content_length = 0;
     bool have_headers = false;
@@ -100,34 +159,40 @@ std::string read_request(int fd) {
 
     while (true) {
         ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
-        if (n <= 0) break;
-        data.append(buf, static_cast<std::size_t>(n));
+        if (n <= 0) return out; // Closed (peer, error, or SO_RCVTIMEO expiry)
+        out.data.append(buf, static_cast<std::size_t>(n));
 
         if (!have_headers) {
-            auto pos = data.find("\r\n\r\n");
-            if (pos != std::string::npos) {
-                have_headers = true;
-                header_end = pos + 4;
-                // crude Content-Length scan (case-insensitive-ish, common casing).
-                auto cl = data.find("Content-Length:");
-                if (cl == std::string::npos) cl = data.find("content-length:");
-                if (cl != std::string::npos && cl < pos) {
-                    auto eol = data.find("\r\n", cl);
-                    content_length = static_cast<std::size_t>(
-                        std::strtoul(data.substr(cl + 15, eol - cl - 15).c_str(), nullptr, 10));
+            auto pos = out.data.find("\r\n\r\n");
+            if (pos == std::string::npos) {
+                if (out.data.size() > limits.max_header_bytes) {
+                    out.status = ReadResult::Status::HeaderTooLarge;
+                    return out;
                 }
+                continue;
+            }
+            have_headers = true;
+            header_end = pos + 4;
+            std::string head = out.data.substr(0, pos);
+            if (head.size() > limits.max_header_bytes) {
+                out.status = ReadResult::Status::HeaderTooLarge;
+                return out;
+            }
+            if (has_chunked_body(head)) {
+                out.status = ReadResult::Status::LengthRequired;
+                return out;
+            }
+            content_length = parse_content_length(head).value_or(0);
+            if (content_length > limits.max_body_bytes) {
+                out.status = ReadResult::Status::BodyTooLarge;
+                return out;
             }
         }
-        if (have_headers && data.size() >= header_end + content_length) break;
+        if (out.data.size() >= header_end + content_length) {
+            out.status = ReadResult::Status::Ok;
+            return out;
+        }
     }
-    return data;
-}
-
-// Lower-case copy, for case-insensitive header matching (header names/values are
-// case-insensitive, and a client may send "Connection: keep-alive, Upgrade").
-std::string lower(std::string s) {
-    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return s;
 }
 
 // True if the request is a WebSocket Upgrade (Upgrade: websocket + Connection
@@ -147,9 +212,53 @@ bool is_websocket_upgrade(const Request& req) {
 
 } // namespace
 
-void HttpServer::handle_client(int client) {
-    std::string raw = read_request(client);
-    auto req = parse_http_request(raw);
+namespace {
+
+void send_all(int fd, const std::string& out) {
+    std::size_t sent = 0;
+    while (sent < out.size()) {
+        ssize_t n = ::send(fd, out.data() + sent, out.size() - sent, 0);
+        if (n <= 0) break;
+        sent += static_cast<std::size_t>(n);
+    }
+}
+
+void set_recv_timeout(int fd, int seconds) {
+    timeval tv{};
+    tv.tv_sec = seconds; // 0 disables (blocking recv again)
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+}
+
+} // namespace
+
+void HttpServer::handle_client(int client, const std::string& remote_addr) {
+    // The timeout guards the request read: a client that connects and trickles (or
+    // sends nothing) releases this worker after limits_.read_timeout_seconds.
+    if (limits_.read_timeout_seconds > 0) set_recv_timeout(client, limits_.read_timeout_seconds);
+
+    ReadResult raw = read_request(client, limits_);
+    switch (raw.status) {
+        case ReadResult::Status::Closed:
+            ::close(client);
+            return;
+        case ReadResult::Status::HeaderTooLarge:
+            send_all(client, format_http_response(Response{431, "Request Header Fields Too Large"}));
+            ::close(client);
+            return;
+        case ReadResult::Status::BodyTooLarge:
+            send_all(client, format_http_response(Response{413, "Payload Too Large"}));
+            ::close(client);
+            return;
+        case ReadResult::Status::LengthRequired:
+            send_all(client, format_http_response(Response{411, "Length Required"}));
+            ::close(client);
+            return;
+        case ReadResult::Status::Ok:
+            break;
+    }
+
+    auto req = parse_http_request(raw.data);
+    if (req) req->remote_addr = remote_addr;
 
     // WebSocket Upgrade: hand the live socket to the registered endpoint handler,
     // which owns it for the connection's lifetime (handshake + frame loop) and
@@ -157,6 +266,9 @@ void HttpServer::handle_client(int client) {
     if (req && is_websocket_upgrade(*req)) {
         auto it = ws_handlers_.find(req->path);
         if (it != ws_handlers_.end()) {
+            // The read timeout was for the HTTP request; a WebSocket connection is
+            // long-lived and legitimately idle, so hand the socket over blocking.
+            if (limits_.read_timeout_seconds > 0) set_recv_timeout(client, 0);
             it->second(client, *req);
             return;
         }
@@ -164,15 +276,23 @@ void HttpServer::handle_client(int client) {
         // to the normal request cycle (the router answers, typically a 404).
     }
 
-    Response res = req ? kernel_->handle(*req) : Response{400, "Bad Request"};
-    std::string out = format_http_response(res);
-
-    std::size_t sent = 0;
-    while (sent < out.size()) {
-        ssize_t n = ::send(client, out.data() + sent, out.size() - sent, 0);
-        if (n <= 0) break;
-        sent += static_cast<std::size_t>(n);
+    // Kernel already catches; this belt-and-braces catch covers other KernelContract
+    // implementations so a throw can never escape into the worker thread and terminate.
+    Response res;
+    if (!req) {
+        res = Response{400, "Bad Request"};
+    } else {
+        try {
+            res = kernel_->handle(*req);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "[http] unhandled exception: %s\n", e.what());
+            res = Response{500, "Internal Server Error"};
+        } catch (...) {
+            std::fprintf(stderr, "[http] unhandled non-std exception\n");
+            res = Response{500, "Internal Server Error"};
+        }
     }
+    send_all(client, format_http_response(res));
     ::close(client);
 }
 
@@ -181,12 +301,17 @@ void HttpServer::accept_loop(int server_fd) {
     // kernel hands each connection to exactly one of them. stop() closes the socket,
     // which makes accept() fail — the running_ check then breaks the loop.
     while (running_) {
-        int client = ::accept(server_fd, nullptr, nullptr);
+        sockaddr_in peer{};
+        socklen_t peer_len = sizeof(peer);
+        int client = ::accept(server_fd, reinterpret_cast<sockaddr*>(&peer), &peer_len);
         if (client < 0) {
             if (!running_) break;
             continue;
         }
-        handle_client(client);
+        char ip[INET_ADDRSTRLEN] = "";
+        if (peer.sin_family == AF_INET)
+            ::inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof(ip));
+        handle_client(client, ip);
     }
 }
 

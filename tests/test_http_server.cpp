@@ -115,3 +115,38 @@ TEST(http_server_stop_ends_serve) {
         t.detach(); // serve() hung — don't wedge the rest of the suite
     }
 }
+
+TEST(http_content_length_is_case_insensitive) {
+    // Any casing counts (RFC 9110); previously only two exact spellings were seen,
+    // so "Content-length: 5" under-read the body.
+    std::string head = "POST /x HTTP/1.1\r\nContent-length: 5\r\nHost: x";
+    auto n = parse_content_length(head);
+    CHECK(n.has_value());
+    CHECK_EQ(*n, static_cast<std::size_t>(5));
+
+    CHECK(!parse_content_length("GET /x HTTP/1.1\r\nHost: x").has_value()); // absent
+    CHECK(!parse_content_length("GET /x HTTP/1.1\r\nContent-Length: abc").has_value());
+    CHECK(!parse_content_length("GET /x HTTP/1.1\r\nContent-Length: -1").has_value());
+}
+
+TEST(http_content_length_matches_header_names_only) {
+    // A header VALUE containing the words must not be mistaken for the header.
+    std::string head = "GET /x HTTP/1.1\r\nX-Note: content-length: 999\r\nContent-Length: 7";
+    auto n = parse_content_length(head);
+    CHECK(n.has_value());
+    CHECK_EQ(*n, static_cast<std::size_t>(7));
+}
+
+TEST(http_detects_chunked_transfer_encoding) {
+    CHECK(has_chunked_body("POST /x HTTP/1.1\r\nTransfer-Encoding: chunked"));
+    CHECK(has_chunked_body("POST /x HTTP/1.1\r\ntransfer-encoding: gzip, Chunked"));
+    CHECK(!has_chunked_body("POST /x HTTP/1.1\r\nContent-Length: 3"));
+}
+
+TEST(http_format_response_new_reason_phrases) {
+    CHECK(has(format_http_response(Response{400, "x"}), "400 Bad Request"));
+    CHECK(has(format_http_response(Response{405, "x"}), "405 Method Not Allowed"));
+    CHECK(has(format_http_response(Response{411, "x"}), "411 Length Required"));
+    CHECK(has(format_http_response(Response{413, "x"}), "413 Payload Too Large"));
+    CHECK(has(format_http_response(Response{431, "x"}), "431 Request Header Fields Too Large"));
+}
