@@ -45,9 +45,17 @@ TEST(auth_login_with_csrf_then_me_is_authorized) {
 
     HttpClient http(*app.kernel, __fails);
     http.withHeader("Cookie", "lwsid=" + lp.sid);
-    http.post("/login", "username=ada&password=secret&_token=" + lp.token)
-        .assertStatus(302)
-        .assertHeader("Location", "/me");
+    auto login = http.post("/login", "username=ada&password=secret&_token=" + lp.token);
+    login.assertStatus(302).assertHeader("Location", "/me");
+
+    // Login regenerates the session id (fixation defense): the 302 carries the new
+    // cookie, and only the NEW id is authenticated — the pre-login id is dead.
+    std::string fresh = sid_from(login.raw().headers.at("Set-Cookie"));
+    CHECK(!fresh.empty());
+    CHECK(fresh != lp.sid);
+    http.withHeader("Cookie", "lwsid=" + lp.sid); // the old, possibly planted id
+    http.get("/me").assertStatus(401);
+    http.withHeader("Cookie", "lwsid=" + fresh);  // the browser follows Set-Cookie
     http.get("/me").assertOk().assertSee("ada");
 }
 
@@ -83,8 +91,14 @@ TEST(auth_logout_clears_session) {
 
     HttpClient http(*app.kernel, __fails);
     http.withHeader("Cookie", "lwsid=" + lp.sid);
-    http.post("/login", "username=ada&password=secret&_token=" + lp.token).assertStatus(302);
+    auto login = http.post("/login", "username=ada&password=secret&_token=" + lp.token);
+    login.assertStatus(302);
+
+    // Follow the regenerated cookie; the session data (incl. the CSRF token) moved
+    // with it, so the same _token still verifies the logout POST.
+    std::string fresh = sid_from(login.raw().headers.at("Set-Cookie"));
+    http.withHeader("Cookie", "lwsid=" + fresh);
     http.get("/me").assertOk();
     http.post("/logout", "_token=" + lp.token).assertStatus(302);
-    http.get("/me").assertStatus(401);
+    http.get("/me").assertStatus(401); // session flushed
 }

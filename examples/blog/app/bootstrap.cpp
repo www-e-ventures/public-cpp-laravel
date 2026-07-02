@@ -13,9 +13,9 @@
 #include "cache.hpp"
 #include "livewire.hpp"
 #include "livewire_client.hpp"
+#include "http_auth.hpp"
 #include "middleware.hpp"
 #include "providers.hpp"
-#include "throttle.hpp"
 #include "todo_list.hpp"
 #include "user_controller.hpp"
 
@@ -89,18 +89,21 @@ App bootstrap() {
     auto auth = std::make_shared<AuthController>(sessions, users);
 
     router->get("/login", [auth](Request& r) { return auth->show_login(r); });
-    router->post("/login", [auth](Request& r) { return auth->login(r); }, {verify_csrf(sessions)});
-    router->post("/logout", [auth](Request& r) { return auth->logout(r); }, {verify_csrf(sessions)});
-    router->get("/me", [auth](Request& r) { return auth->me(r); }, {require_auth(sessions)});
+    router->post("/login", [auth](Request& r) { return auth->login(r); },
+                 {httpauth::verify_csrf(sessions)});
+    router->post("/logout", [auth](Request& r) { return auth->logout(r); },
+                 {httpauth::verify_csrf(sessions)});
+    router->get("/me", [auth](Request& r) { return auth->me(r); },
+                {httpauth::require_auth(sessions)});
 
     // Rate-limited endpoint: at most 3 requests per client per minute.
     auto cache = std::static_pointer_cast<CacheContract>(std::make_shared<ArrayCache>());
     router->get("/ping", [](Request&) { return Response::json(R"({"pong":true})"); },
-                {throttle(cache, 3, std::chrono::seconds(60))});
+                {httpauth::throttle(cache, 3, std::chrono::seconds(60))});
 
     auto kernel = std::make_shared<Kernel>(container, router);
     // Session middleware runs on every request (after logging).
-    kernel->global_middleware({logging_mw, session_middleware(sessions)});
+    kernel->global_middleware({logging_mw, httpauth::session_middleware(sessions)});
 
     // Service providers register + boot the app's bindings (which use the autowiring
     // helpers internally). The Kernel runs them in two phases: register all, then boot all.

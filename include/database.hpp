@@ -53,6 +53,21 @@ struct Row {
     bool has(const std::string& key) const { return data.find(key) != data.end(); }
 };
 
+// True for a safe SQL identifier: [A-Za-z_][A-Za-z0-9_]*. Column/table names are
+// spliced into SQL as text (they can't be bound like values), so anything that
+// reaches a query from user input — a ?sort= parameter mapped to order_by(), say —
+// must pass this or be refused. The QueryBuilder and the SQL backends both check.
+inline bool is_sql_identifier(const std::string& s) {
+    if (s.empty()) return false;
+    auto word = [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+    };
+    if (!word(s[0])) return false;
+    for (char c : s)
+        if (!word(c) && !(c >= '0' && c <= '9')) return false;
+    return true;
+}
+
 // Comparison operators for a where clause. `In` matches against `values`.
 enum class Op { Eq, Ne, Lt, Lte, Gt, Gte, In };
 

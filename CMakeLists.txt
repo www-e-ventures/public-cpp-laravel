@@ -91,6 +91,7 @@ if(PROJECT_IS_TOP_LEVEL)
         tests/test_services.cpp
         tests/test_session.cpp
         tests/test_auth.cpp
+        tests/test_http_auth.cpp
         tests/test_gate.cpp
         tests/test_hash.cpp
         tests/test_broadcast.cpp

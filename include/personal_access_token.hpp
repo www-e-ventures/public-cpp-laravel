@@ -68,11 +68,19 @@ public:
 
     // Authenticate a presented plaintext token. Returns its Record if the hash matches
     // an unexpired row, else nullopt. `now` (unix seconds) is injectable for tests.
+    //
+    // The lookup is WHERE token_hash = ? (a bound value through the Query contract) —
+    // NOT a scan of every row, so it stays O(index) as tokens accumulate. Put a
+    // UNIQUE index on token_hash in the app's migration:
+    //   CREATE UNIQUE INDEX idx_pat_token_hash ON personal_access_tokens(token_hash);
+    // Matching on the deterministic SHA-256 in the database is the standard shape
+    // (Sanctum does the same): an attacker probing timing learns which HASH bytes
+    // match, and inverting SHA-256 from that is not a practical oracle.
     std::optional<Record> authenticate(const std::string& presented, std::int64_t now = 0) const {
         if (now == 0) now = static_cast<std::int64_t>(std::time(nullptr));
-        std::string h = tok::sha256_hex(presented);
-        for (const auto& r : db_->all(table_)) {
-            if (!r.has("token_hash") || r.get<std::string>("token_hash") != h) continue;
+        Query q;
+        q.wheres.push_back({"token_hash", Op::Eq, Value{tok::sha256_hex(presented)}});
+        for (const auto& r : db_->select(table_, q)) {
             std::int64_t exp = r.has("expires_at") ? r.get<std::int64_t>("expires_at") : 0;
             if (exp != 0 && now > exp) return std::nullopt; // expired
             return to_record(r);

@@ -22,6 +22,8 @@ std::string reason_phrase(int status) {
         case 200: return "OK";
         case 201: return "Created";
         case 206: return "Partial Content";
+        case 301: return "Moved Permanently";
+        case 302: return "Found";
         case 304: return "Not Modified";
         case 400: return "Bad Request";
         case 401: return "Unauthorized";

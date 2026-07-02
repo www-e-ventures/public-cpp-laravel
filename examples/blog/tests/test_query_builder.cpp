@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <string>
 
 #include "database.hpp"
@@ -103,4 +104,39 @@ TEST(query_second_model_author) {
     auto byName = repo.query().where("name", Value{std::string("Ada")}).get();
     CHECK_EQ(byName.size(), n(1));
     CHECK_EQ(byName.front().article_count, std::int64_t{3});
+}
+
+// Column names are spliced into SQL text (values are bound; identifiers can't be),
+// so a request parameter mapped to order_by()/where() — /articles?sort=... — must
+// be refused unless it's a plain identifier. The builder throws at the call site.
+TEST(query_rejects_unsafe_identifiers) {
+    auto repo = seeded();
+
+    bool threw = false;
+    try {
+        repo.query().order_by("views; DROP TABLE articles");
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    CHECK(threw);
+
+    threw = false;
+    try {
+        repo.query().where("title' OR '1'='1", Value{std::string("x")});
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    CHECK(threw);
+
+    threw = false;
+    try {
+        repo.query().where_in("id)", {Value{std::int64_t{1}}});
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    CHECK(threw);
+
+    // Plain identifiers (incl. underscores/digits) stay accepted.
+    auto ok = repo.query().where("published", Value{true}).order_by("views", true).get();
+    CHECK_EQ(ok.size(), n(2));
 }

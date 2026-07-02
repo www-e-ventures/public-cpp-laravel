@@ -56,6 +56,16 @@ Row read_row(sqlite3_stmt* stmt) {
     return row;
 }
 
+// Identifiers (table/column names) are spliced into the SQL text — they cannot be
+// bound like values — so they must be plain identifiers. The QueryBuilder already
+// refuses bad ones at the API boundary; this is the backend's own line of defense
+// for callers that build Query/Row objects directly.
+std::string ident(const std::string& name) {
+    if (!is_sql_identifier(name))
+        throw std::invalid_argument("sqlite: unsafe SQL identifier: " + name);
+    return name;
+}
+
 } // namespace
 
 SqliteConnection::SqliteConnection(const std::string& path) {
@@ -81,10 +91,10 @@ std::int64_t SqliteConnection::insert(const std::string& table, Row row) {
     std::string names, marks;
     for (std::size_t i = 0; i < cols.size(); ++i) {
         if (i) { names += ", "; marks += ", "; }
-        names += cols[i].first;
+        names += ident(cols[i].first);
         marks += "?";
     }
-    std::string sql = "INSERT INTO " + table + " (" + names + ") VALUES (" + marks + ")";
+    std::string sql = "INSERT INTO " + ident(table) + " (" + names + ") VALUES (" + marks + ")";
 
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return 0;
@@ -97,7 +107,7 @@ std::int64_t SqliteConnection::insert(const std::string& table, Row row) {
 
 std::optional<Row> SqliteConnection::find(const std::string& table, std::int64_t id) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::string sql = "SELECT * FROM " + table + " WHERE id = ?";
+    std::string sql = "SELECT * FROM " + ident(table) + " WHERE id = ?";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return std::nullopt;
     sqlite3_bind_int64(stmt, 1, id);
@@ -113,20 +123,20 @@ std::vector<Row> SqliteConnection::all(const std::string& table) const {
 
 std::vector<Row> SqliteConnection::select(const std::string& table, const Query& query) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::string sql = "SELECT * FROM " + table;
+    std::string sql = "SELECT * FROM " + ident(table);
     for (std::size_t i = 0; i < query.wheres.size(); ++i) {
         const auto& w = query.wheres[i];
         sql += (i == 0 ? " WHERE " : " AND ");
         if (w.op == Op::In) {
-            sql += w.column + " IN (";
+            sql += ident(w.column) + " IN (";
             for (std::size_t j = 0; j < w.values.size(); ++j) sql += (j ? ",?" : "?");
             sql += ")";
         } else {
-            sql += w.column + " " + op_sql(w.op) + " ?";
+            sql += ident(w.column) + " " + op_sql(w.op) + " ?";
         }
     }
     if (query.order)
-        sql += " ORDER BY " + query.order->column + (query.order->descending ? " DESC" : " ASC");
+        sql += " ORDER BY " + ident(query.order->column) + (query.order->descending ? " DESC" : " ASC");
     if (query.limit) sql += " LIMIT " + std::to_string(*query.limit);
     if (query.offset) {
         if (!query.limit) sql += " LIMIT -1"; // SQLite requires LIMIT before OFFSET
@@ -157,9 +167,9 @@ bool SqliteConnection::update(const std::string& table, std::int64_t id, const R
     std::string sets;
     for (std::size_t i = 0; i < cols.size(); ++i) {
         if (i) sets += ", ";
-        sets += cols[i].first + " = ?";
+        sets += ident(cols[i].first) + " = ?";
     }
-    std::string sql = "UPDATE " + table + " SET " + sets + " WHERE id = ?";
+    std::string sql = "UPDATE " + ident(table) + " SET " + sets + " WHERE id = ?";
 
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
@@ -173,7 +183,7 @@ bool SqliteConnection::update(const std::string& table, std::int64_t id, const R
 
 bool SqliteConnection::remove(const std::string& table, std::int64_t id) {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::string sql = "DELETE FROM " + table + " WHERE id = ?";
+    std::string sql = "DELETE FROM " + ident(table) + " WHERE id = ?";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
     sqlite3_bind_int64(stmt, 1, id);

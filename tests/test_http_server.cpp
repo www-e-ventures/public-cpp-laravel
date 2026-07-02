@@ -144,6 +144,7 @@ TEST(http_detects_chunked_transfer_encoding) {
 }
 
 TEST(http_format_response_new_reason_phrases) {
+    CHECK(has(format_http_response(Response{302, "x"}), "302 Found"));
     CHECK(has(format_http_response(Response{400, "x"}), "400 Bad Request"));
     CHECK(has(format_http_response(Response{405, "x"}), "405 Method Not Allowed"));
     CHECK(has(format_http_response(Response{411, "x"}), "411 Length Required"));

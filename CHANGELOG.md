@@ -4,6 +4,57 @@ Notable changes to cpp-laravel. Versioning is semantic; a passing test suite
 (`ctest`) is the release gate. Depend on a tag and upgrade deliberately — see
 [`docs/consuming.md`](docs/consuming.md).
 
+## [0.8.0] — 2026-07-01
+
+"Identity done right" — security hardening across sessions, auth, tokens, and the
+query builder. Mostly additive; two deliberate behavior changes are called out.
+
+### Added
+- **`http_auth.hpp` — the HTTP auth kit**, promoted out of the blog example so every
+  consumer shares ONE audited implementation instead of copy-pasting (the BBS
+  hand-rolled its own admin cookie sessions for exactly this reason). Zero-dep,
+  header-only, in the `httpauth` namespace: `session_middleware` (cookie issue with
+  configurable `HttpOnly`/`Secure`/`SameSite` flags via `CookieOptions`),
+  `csrf_token` + `verify_csrf` (CSPRNG tokens, constant-time compare, 419),
+  `require_auth` (401), `attempt_login` (regenerates the session id on success —
+  session-fixation defense — and stamps the new cookie), `logout` (full session
+  flush), and `throttle` (fixed-window rate limiter keyed on `Request.remote_addr`
+  with cookie fallback; the window boundary lives in the cached value, fixing the
+  example limiter that reset its TTL on every hit and never unblocked sustained
+  traffic).
+- **CSPRNG ids** — `csprng_hex(n)` (/dev/urandom) in `session.hpp`;
+  `new_session_id()` now returns 128 unpredictable bits (was: a seeded
+  `mt19937_64` stream — observable, predictable) and CSRF tokens mint from the
+  same source.
+- **Session TTL + GC + regeneration** — `ArraySessionStore(ttl)` expires idle
+  sessions (lazily on access, in bulk via `gc()`); `SessionStore::rename()`
+  (virtual, default "unsupported") backs the new `Session::regenerate_id()`;
+  `Guard::session()` exposes the handle the HTTP layer needs.
+- **Injectable password hasher** — `ArrayUserProvider(std::shared_ptr<const
+  HashContract>)`: inject `Pbkdf2Hasher` for production passwords; the dep-free
+  FNV `Hasher` stays the default demo. (The stale "passwords are compared in
+  plain text" comment in auth.hpp is gone — it hadn't been true for a while.)
+- **SQL identifier guard** — `is_sql_identifier()` in database.hpp;
+  `QueryBuilder::where/where_in/order_by` and every spliced name in
+  `SqliteConnection` refuse non-identifier column/table names
+  (`std::invalid_argument`). Closes the `?sort=views;DROP TABLE` splice — values
+  were always bound; identifiers now can't smuggle SQL either.
+- `302 Found` / `301 Moved Permanently` reason phrases.
+
+### Changed (behavior)
+- **`ArraySessionStore` is now mutex-guarded** — it was shared across HttpServer
+  worker threads without one (a real data race under `serve(N > 1)`).
+- **Successful login via the kit regenerates the session id**: the old (possibly
+  attacker-planted) id stops authenticating and the response carries the new
+  cookie. Clients must follow `Set-Cookie` — browsers already do; test clients
+  may need updating (the blog feature tests show the pattern).
+- **`pat::Store::authenticate` looks up by `WHERE token_hash = ?`** instead of
+  scanning every row — O(index) as tokens accumulate. Add a UNIQUE index on
+  `token_hash` in your migration (see the header comment).
+- The blog example's `session_middleware`/`verify_csrf`/`require_auth`/`throttle`
+  free functions moved into the framework as `httpauth::*`; `examples/blog` now
+  wires the kit (its local `throttle.hpp` is gone).
+
 ## [0.7.0] — 2026-07-01
 
 "The server survives" — robustness hardening for the HTTP and WebSocket layers.

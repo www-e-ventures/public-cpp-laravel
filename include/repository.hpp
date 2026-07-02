@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -39,24 +40,30 @@ class QueryBuilder {
 public:
     explicit QueryBuilder(Connection& conn) : conn_(&conn) {}
 
+    // Column names are spliced into SQL (they can't be bound like values), so an app
+    // that maps user input to a column — /articles?sort=views -> order_by(sort) —
+    // would be injectable. Refuse anything that isn't a plain identifier, loudly:
+    // the throw happens at the call site naming the bad column, and the HTTP layer
+    // turns it into a 500 rather than executing attacker SQL. (Values are safe —
+    // they're bound as parameters by the SQL backends.)
     QueryBuilder& where(const std::string& column, Value value) {
-        query_.wheres.push_back({column, Op::Eq, std::move(value)});
+        query_.wheres.push_back({checked(column), Op::Eq, std::move(value)});
         return *this;
     }
     QueryBuilder& where(const std::string& column, Op op, Value value) {
-        query_.wheres.push_back({column, op, std::move(value)});
+        query_.wheres.push_back({checked(column), op, std::move(value)});
         return *this;
     }
     QueryBuilder& where_in(const std::string& column, std::vector<Value> values) {
         WhereClause w;
-        w.column = column;
+        w.column = checked(column);
         w.op = Op::In;
         w.values = std::move(values);
         query_.wheres.push_back(std::move(w));
         return *this;
     }
     QueryBuilder& order_by(const std::string& column, bool descending = false) {
-        query_.order = OrderClause{column, descending};
+        query_.order = OrderClause{checked(column), descending};
         return *this;
     }
     QueryBuilder& limit(std::size_t n) {
@@ -102,6 +109,12 @@ public:
     std::size_t count() const { return conn_->select(Mapper::table(), query_).size(); }
 
 private:
+    static const std::string& checked(const std::string& column) {
+        if (!is_sql_identifier(column))
+            throw std::invalid_argument("unsafe SQL identifier: " + column);
+        return column;
+    }
+
     Connection* conn_;
     Query query_;
 };

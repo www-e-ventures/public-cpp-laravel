@@ -356,8 +356,6 @@ TEST(websocket_run_terminal_echoes_input_as_binary) {
     ::close(client_fd);
 }
 
-int main() { return RUN_ALL_TESTS(); }
-
 // --- Size caps, masking enforcement, close-code echo (v0.7.0 hardening) ------
 
 TEST(websocket_parse_frame_flags_oversized_declared_length) {
@@ -522,3 +520,5 @@ TEST(websocket_connection_echoes_peer_close_code) {
     conn.close();
     ::close(sv[1]);
 }
+
+int main() { return RUN_ALL_TESTS(); }

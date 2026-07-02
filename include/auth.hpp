@@ -4,10 +4,13 @@
 // Guard ties a UserProvider to a Session, persisting the logged-in user's id under
 // "auth_id". ArrayUserProvider is the in-memory default.
 //
-// NOTE: passwords are compared in plain text here (demo). A real provider would hash
-// (bcrypt/argon2) — a deliberate, documented simplification.
+// Passwords are stored hashed through an injectable HashContract. The default is the
+// dependency-free Hasher (salted FNV-1a — demo strength, documented in hash.hpp);
+// production apps inject Pbkdf2Hasher (pbkdf2_hash.hpp, OpenSSL-gated) through the
+// same seam: ArrayUserProvider(std::make_shared<Pbkdf2Hasher>()).
 #pragma once
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -32,9 +35,14 @@ public:
 
 class ArrayUserProvider : public UserProvider {
 public:
+    // Hashes with the dependency-free default unless a stronger HashContract is
+    // injected (e.g. Pbkdf2Hasher for production passwords).
+    explicit ArrayUserProvider(std::shared_ptr<const HashContract> hasher = nullptr)
+        : hasher_(hasher ? std::move(hasher) : std::make_shared<const Hasher>()) {}
+
     // The password is hashed on the way in; AuthUser.password stores the hash.
     ArrayUserProvider& add(AuthUser user) {
-        user.password = hasher_.make(user.password);
+        user.password = hasher_->make(user.password);
         users_.push_back(std::move(user));
         return *this;
     }
@@ -49,12 +57,12 @@ public:
         return std::nullopt;
     }
     bool validate(const AuthUser& user, const std::string& password) const override {
-        return hasher_.check(password, user.password);
+        return hasher_->check(password, user.password);
     }
 
 private:
     std::vector<AuthUser> users_;
-    Hasher hasher_;
+    std::shared_ptr<const HashContract> hasher_;
 };
 
 // Session-backed guard. State persists through the Session (and its store), so a guard
@@ -91,6 +99,10 @@ public:
         auto uid = id();
         return uid ? provider_->retrieve_by_id(*uid) : std::nullopt;
     }
+
+    // The guard's session handle — the HTTP layer uses it to regenerate the id on
+    // login (session fixation) and re-issue the cookie; see httpauth::attempt_login.
+    Session& session() { return session_; }
 
 private:
     const UserProvider* provider_;

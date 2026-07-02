@@ -2,6 +2,7 @@
 #include "test_harness.hpp"
 
 #include <string>
+#include <memory>
 
 #include "auth.hpp"
 #include "session.hpp"
@@ -61,4 +62,27 @@ TEST(auth_persists_across_guards) {
     auto u = later.user();
     CHECK(u.has_value());
     CHECK_EQ(u->username, std::string("ada"));
+}
+
+// The hasher is injectable (the seam Pbkdf2Hasher drops into for production; see
+// tests/test_crypto.cpp for the real PBKDF2 wiring). A stub proves the provider
+// hashes through the injected contract, not a hardcoded Hasher.
+namespace {
+struct StubHasher : HashContract {
+    std::string make(const std::string& plain) const override { return "stub$" + plain; }
+    bool check(const std::string& plain, const std::string& hashed) const override {
+        return hashed == "stub$" + plain;
+    }
+};
+} // namespace
+
+TEST(auth_provider_uses_injected_hasher) {
+    ArrayUserProvider p(std::make_shared<StubHasher>());
+    p.add({1, "ada", "secret"});
+
+    auto u = p.retrieve_by_credentials("ada");
+    CHECK(u.has_value());
+    CHECK_EQ(u->password, std::string("stub$secret")); // hashed via the stub
+    CHECK(p.validate(*u, "secret"));
+    CHECK(!p.validate(*u, "wrong"));
 }

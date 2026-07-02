@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <string>
 
 #include "migration.hpp"
@@ -114,6 +115,32 @@ TEST(sqlite_migrations_rollback) {
     Article a{0, "again", 1, true};
     repo.insert(a);
     CHECK(repo.find(a.id).has_value());
+}
+
+
+// The backend's own identifier check (defense in depth below the QueryBuilder):
+// a hand-built Query with a hostile column name must throw, not reach SQL text.
+TEST(sqlite_rejects_unsafe_identifiers) {
+    auto conn = std::make_shared<SqliteConnection>(":memory:");
+    Migrator(*conn).run(migrations());
+
+    bool threw = false;
+    try {
+        Query q;
+        q.order = OrderClause{"views; DROP TABLE articles", false};
+        conn->select("articles", q);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    CHECK(threw);
+
+    threw = false;
+    try {
+        conn->all("articles WHERE 1=1; --");
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    CHECK(threw);
 }
 
 int main() { return RUN_ALL_TESTS(); }
