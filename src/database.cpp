@@ -116,3 +116,40 @@ bool MemoryConnection::remove(const std::string& table, std::int64_t id) {
                rows.end());
     return rows.size() != before;
 }
+
+bool MemoryConnection::update_if(const std::string& table, std::int64_t id,
+                                 const std::string& guard_col, const Value& guard_value,
+                                 const Row& row) {
+    // One lock across the compare AND the write — a real compare-and-set, so two
+    // queue workers racing to claim the same job can't both win.
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto t = tables_.find(table);
+    if (t == tables_.end()) return false;
+    for (auto& r : t->second) {
+        if (!r.has("id") || r.get<std::int64_t>("id") != id) continue;
+        auto g = r.data.find(guard_col);
+        if (g == r.data.end() || !(g->second == guard_value)) return false;
+        r = row;
+        r.set("id", id);
+        return true;
+    }
+    return false;
+}
+
+void MemoryConnection::begin() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    snapshot_ = std::make_pair(tables_, next_id_);
+}
+
+void MemoryConnection::commit() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    snapshot_.reset();
+}
+
+void MemoryConnection::rollback() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!snapshot_) return; // rollback with no open transaction: no-op
+    tables_ = std::move(snapshot_->first);
+    next_id_ = std::move(snapshot_->second);
+    snapshot_.reset();
+}

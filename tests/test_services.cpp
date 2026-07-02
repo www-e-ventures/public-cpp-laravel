@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <ctime>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -164,4 +165,73 @@ TEST(mail_array_records_messages) {
     CHECK(m.sent_to("ada@x.io"));
     CHECK(!m.sent_to("nobody@x.io"));
     CHECK_EQ(m.sent().front().subject, std::string("Hi"));
+}
+
+// --- v0.9.0: the finished queue driver (claims, delays, backoff) --------------
+
+TEST(db_queue_claim_prevents_double_processing) {
+    auto conn = std::make_shared<MemoryConnection>();
+    // Two workers over the SAME database — the shape of two bbsd processes or a
+    // worker thread pool. The atomic claim (update_if on reserved_at) means each
+    // job runs exactly once even though both workers scan the same rows.
+    DbQueue w1(conn), w2(conn);
+    int runs = 0;
+    w1.handler("job", [&](const std::string&) { ++runs; });
+    w2.handler("job", [&](const std::string&) { ++runs; });
+    w1.push("job");
+    w1.push("job");
+
+    std::int64_t now = 1000;
+    // w1 claims + drains both; w2's pass finds nothing claimable.
+    CHECK_EQ(w1.work(now), static_cast<std::size_t>(2));
+    CHECK_EQ(w2.work(now), static_cast<std::size_t>(0));
+    CHECK_EQ(runs, 2);
+}
+
+TEST(db_queue_delayed_jobs_wait_for_available_at) {
+    auto conn = std::make_shared<MemoryConnection>();
+    DbQueue q(conn);
+    std::string log;
+    q.handler("job", [&](const std::string& p) { log += p; });
+
+    q.push("job", "now");
+    q.push("job", "later", /*delay=*/60);
+    // The delay is measured from the wall clock at push time, so tick "now" far in
+    // the future for the second pass.
+    std::int64_t base = static_cast<std::int64_t>(std::time(nullptr));
+    CHECK_EQ(q.work(base), static_cast<std::size_t>(1)); // only the undelayed job
+    CHECK_EQ(log, std::string("now"));
+    CHECK_EQ(q.work(base + 61), static_cast<std::size_t>(1)); // the delayed one is due
+    CHECK_EQ(log, std::string("nowlater"));
+}
+
+TEST(db_queue_failure_backs_off_before_retry) {
+    auto conn = std::make_shared<MemoryConnection>();
+    DbQueue q(conn, /*max_attempts=*/3, /*retry_backoff=*/10);
+    q.handler("boom", [](const std::string&) { throw std::runtime_error("nope"); });
+    q.push("boom");
+
+    std::int64_t now = 5000;
+    CHECK_EQ(q.work(now), static_cast<std::size_t>(1));      // attempt 1 fails
+    CHECK_EQ(q.work(now + 5), static_cast<std::size_t>(0));  // backing off (10s * 1)
+    CHECK_EQ(q.work(now + 11), static_cast<std::size_t>(1)); // attempt 2 after backoff
+    CHECK_EQ(q.pending(), static_cast<std::size_t>(1));      // still queued (max 3)
+}
+
+TEST(db_queue_reclaims_jobs_from_crashed_workers) {
+    auto conn = std::make_shared<MemoryConnection>();
+    DbQueue q(conn, /*max_attempts=*/3, /*retry_backoff=*/0, /*retry_after=*/90);
+    int runs = 0;
+    q.handler("job", [&](const std::string&) { ++runs; });
+    q.push("job");
+
+    // Simulate a worker that claimed the job and died: reserve it by hand.
+    auto rows = conn->all("jobs");
+    Row stuck = rows.front();
+    stuck.set("reserved_at", std::int64_t{1000});
+    conn->update("jobs", stuck.get<std::int64_t>("id"), stuck);
+
+    CHECK_EQ(q.work(1050), static_cast<std::size_t>(0)); // within retry_after: leave it
+    CHECK_EQ(q.work(1091), static_cast<std::size_t>(1)); // stale claim: reclaimed + run
+    CHECK_EQ(runs, 1);
 }

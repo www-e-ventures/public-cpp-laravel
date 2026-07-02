@@ -96,12 +96,17 @@ std::int64_t SqliteConnection::insert(const std::string& table, Row row) {
     }
     std::string sql = "INSERT INTO " + ident(table) + " (" + names + ") VALUES (" + marks + ")";
 
+    // A refused INSERT (constraint violation, missing table) must throw, not return
+    // a bogus id 0 that reads as success. Consistent with statement()'s behavior.
     sqlite3_stmt* stmt = nullptr;
-    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return 0;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK)
+        throw std::runtime_error("sqlite: " + std::string(sqlite3_errmsg(db_)) + " [" + sql + "]");
     for (std::size_t i = 0; i < cols.size(); ++i)
         bind_value(stmt, static_cast<int>(i + 1), cols[i].second);
-    sqlite3_step(stmt);
+    int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE)
+        throw std::runtime_error("sqlite: " + std::string(sqlite3_errmsg(db_)) + " [" + sql + "]");
     return sqlite3_last_insert_rowid(db_);
 }
 
@@ -191,3 +196,36 @@ bool SqliteConnection::remove(const std::string& table, std::int64_t id) {
     sqlite3_finalize(stmt);
     return sqlite3_changes(db_) > 0;
 }
+
+bool SqliteConnection::update_if(const std::string& table, std::int64_t id,
+                                 const std::string& guard_col, const Value& guard_value,
+                                 const Row& row) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<std::pair<std::string, Value>> cols;
+    for (const auto& kv : row.data)
+        if (kv.first != "id") cols.push_back(kv); // never reassign the PK
+
+    std::string sets;
+    for (std::size_t i = 0; i < cols.size(); ++i) {
+        if (i) sets += ", ";
+        sets += ident(cols[i].first) + " = ?";
+    }
+    // The compare-and-set is a single statement, so the database makes it atomic:
+    // of N workers racing to claim a row, exactly one sees changes() == 1.
+    std::string sql = "UPDATE " + ident(table) + " SET " + sets + " WHERE id = ? AND " +
+                      ident(guard_col) + " = ?";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
+    int idx = 1;
+    for (const auto& c : cols) bind_value(stmt, idx++, c.second);
+    sqlite3_bind_int64(stmt, idx++, id);
+    bind_value(stmt, idx, guard_value);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return sqlite3_changes(db_) > 0;
+}
+
+void SqliteConnection::begin() { statement("BEGIN"); }
+void SqliteConnection::commit() { statement("COMMIT"); }
+void SqliteConnection::rollback() { statement("ROLLBACK"); }

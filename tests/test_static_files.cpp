@@ -109,3 +109,22 @@ TEST(static_if_none_match_is_304) {
     CHECK_EQ(res.status, 304);
     CHECK(res.body.empty());
 }
+
+// extra_headers ride on every served response — the COOP/COEP shape a
+// multithreaded-WASM app needs on both its HTML page and its .wasm module.
+TEST(static_extra_headers_on_200_and_304) {
+    Fixture fx;
+    staticfiles::Options opts;
+    opts.extra_headers = {{"Cross-Origin-Opener-Policy", "same-origin"},
+                          {"Cross-Origin-Embedder-Policy", "require-corp"}};
+
+    Response ok = staticfiles::serve(fx.dir.string(), "app.wasm", get(), opts);
+    CHECK_EQ(ok.status, 200);
+    CHECK_EQ(ok.headers.at("Cross-Origin-Opener-Policy"), std::string("same-origin"));
+    CHECK_EQ(ok.headers.at("Cross-Origin-Embedder-Policy"), std::string("require-corp"));
+
+    Response not_modified = staticfiles::serve(fx.dir.string(), "app.wasm",
+                                               get("If-None-Match", ok.headers.at("ETag")), opts);
+    CHECK_EQ(not_modified.status, 304);
+    CHECK_EQ(not_modified.headers.at("Cross-Origin-Opener-Policy"), std::string("same-origin"));
+}

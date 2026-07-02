@@ -97,6 +97,35 @@ inline App bootstrap(const std::string& public_dir, const std::string& token_sec
         },
         {tok::requires_ability("items:write", token_secret)});
 
+    // Save-states: the emulator POSTs a machine snapshot as a RAW BINARY body (no
+    // form encoding — Request.body is byte-exact) and GETs it back byte-for-byte via
+    // Response::bytes. Small user-generated blobs (hundreds of KB), kept well under
+    // HttpServer's body limit. Writes need the "saves:write" ability.
+    router->post(
+        "/api/savestates",
+        [db](Request& req) {
+            if (req.body.empty()) return Response::json(R"({"error":"empty body"})", 422);
+            Row r;
+            auto name = req.query.find("name");
+            r.set("name", name == req.query.end() ? std::string("unnamed") : name->second);
+            r.set("data", req.body); // binary-safe: Value's std::string carries NULs
+            std::int64_t id = db->insert("savestates", std::move(r));
+            return Response::json("{\"id\":" + std::to_string(id) + "}", 201);
+        },
+        {tok::requires_ability("saves:write", token_secret)});
+
+    router->get("/api/savestates/{id}", [db](Request& req) {
+        std::int64_t id = 0;
+        try {
+            id = std::stoll(req.route_params.at("id"));
+        } catch (...) {
+            return Response::json(R"({"error":"bad id"})", 422);
+        }
+        auto row = db->find("savestates", id);
+        if (!row) return Response::json(R"({"error":"not found"})", 404);
+        return Response::bytes(row->get<std::string>("data"));
+    });
+
     auto kernel = std::make_shared<Kernel>(container, router);
     return App{container, router, kernel, db};
 }

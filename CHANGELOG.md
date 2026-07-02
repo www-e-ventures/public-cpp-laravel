@@ -4,6 +4,53 @@ Notable changes to cpp-laravel. Versioning is semantic; a passing test suite
 (`ctest`) is the release gate. Depend on a tag and upgrade deliberately — see
 [`docs/consuming.md`](docs/consuming.md).
 
+## [0.9.0] — 2026-07-01
+
+"The promised features" — everything the consumers pre-negotiated in the wish-list
+thread that hadn't shipped yet: the finished queue + a scheduler (the BBS's daily-turn
+door games), binary responses + static extra headers (coco's save-states and future
+threaded WASM), and ORM transactions. Additive except one fix called out below.
+
+### Added
+- **`Response::bytes(data, len, content_type)`** (+ a `std::string` overload) — the
+  binary-blob response coco's integration sketch has been calling all along. Byte-
+  exact (NULs and high bytes survive). `examples/coco-web` gains the reference
+  save-state endpoints: `POST /api/savestates` (raw binary body, `saves:write`
+  ability) and `GET /api/savestates/{id}` round-trip a snapshot byte-for-byte.
+- **`staticfiles::Options.extra_headers`** — headers stamped on every static
+  response (200/206/304/416). The driving recipe, documented on the struct: the
+  `Cross-Origin-Opener-Policy: same-origin` + `Cross-Origin-Embedder-Policy:
+  require-corp` pair a SharedArrayBuffer/threaded-WASM app needs on its HTML and
+  its module.
+- **The DB queue, finished.** Jobs carry `available_at` (delayed jobs: `push(job,
+  payload, delay)`) and `reserved_at`; `work(now)` claims each due job with an
+  atomic compare-and-set, so N workers — threads or separate processes on one
+  database — never double-process (previously two workers both read and both ran
+  every job). Failures back off (`retry_backoff * attempts`); jobs orphaned by a
+  crashed worker are reclaimed after `retry_after` seconds; `now` is injectable so
+  none of it needs sleeps to test. Table columns documented in the header.
+- **`scheduler.hpp` — a tiny cron-style `Schedule`.** `every(seconds, name, fn)` and
+  `daily_at("HH:MM", name, fn)` (local time; a late tick still runs today's task —
+  the daily-turn shape), driven by `run_pending(now)` from real cron, a loop, or
+  `schedule:run`. Last-run stamps persist through a Connection ("schedule_runs")
+  so restarts don't double-fire; a throwing task doesn't re-fire every tick.
+- **`Connection::update_if(table, id, guard_col, guard_value, row)`** — compare-and-
+  set update (the queue's claim primitive). Atomic on both shipped backends; virtual
+  with a read-compare-write default so custom backends keep compiling.
+- **Transactions**: `Connection::begin/commit/rollback` (no-op defaults; SQLite maps
+  to BEGIN/COMMIT/ROLLBACK, MemoryConnection snapshots/restores) and a
+  `transaction(conn, fn)` helper — commit on return, rollback + rethrow on throw.
+  Caveat documented: the shipped backends share one underlying connection across
+  threads, so keep transactions short.
+- **`cpp-artisan`**: `migrate`, `migrate:rollback` (Migrator::rollback existed but
+  had no CLI), `queue:work [poll_seconds]` (SIGINT/SIGTERM-clean worker loop), and
+  `schedule:run` (one tick, for cron). The blog example wires a demo handler +
+  schedule and migrates the queue/scheduler tables.
+
+### Fixed
+- **`SqliteConnection::insert` throws on a refused INSERT** (constraint violation,
+  missing table/column) instead of returning a bogus id 0 that read as success.
+
 ## [0.8.0] — 2026-07-01
 
 "Identity done right" — security hardening across sessions, auth, tokens, and the

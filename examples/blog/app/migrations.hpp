@@ -48,10 +48,44 @@ struct CreateComments : Migration {
     void down(Connection& c) override { Schema::drop_if_exists(c, "comments"); }
 };
 
+// The queue driver's tables + the scheduler's last-run stamps (db_queue.hpp /
+// scheduler.hpp document the columns). Needed on SQLite; the in-memory backend
+// auto-creates tables so this is a no-op there.
+struct CreateQueueTables : Migration {
+    std::string name() const override { return "2026_07_01_000004_create_queue_tables"; }
+    void up(Connection& c) override {
+        Schema::create(c, "jobs", [](Blueprint& t) {
+            t.id();
+            t.string("job");
+            t.string("payload");
+            t.integer("attempts");
+            t.integer("available_at");
+            t.integer("reserved_at");
+        });
+        Schema::create(c, "failed_jobs", [](Blueprint& t) {
+            t.id();
+            t.string("job");
+            t.string("payload");
+            t.string("error");
+        });
+        Schema::create(c, "schedule_runs", [](Blueprint& t) {
+            t.id();
+            t.string("name");
+            t.integer("last_run");
+        });
+    }
+    void down(Connection& c) override {
+        Schema::drop_if_exists(c, "jobs");
+        Schema::drop_if_exists(c, "failed_jobs");
+        Schema::drop_if_exists(c, "schedule_runs");
+    }
+};
+
 inline std::vector<std::shared_ptr<Migration>> app_migrations() {
     return {
         std::make_shared<CreateArticles>(),
         std::make_shared<CreateAuthors>(),
         std::make_shared<CreateComments>(),
+        std::make_shared<CreateQueueTables>(),
     };
 }

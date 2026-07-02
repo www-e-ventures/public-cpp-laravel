@@ -1,6 +1,7 @@
 // http.hpp — HTTP contracts
 // Laravel: Illuminate\Http\{Request,Response}
 #pragma once
+#include <cstddef>
 #include <string>
 #include <unordered_map>
 
@@ -41,6 +42,29 @@ struct Response {
         Response r;
         r.status = 302;
         r.headers["Location"] = url;
+        return r;
+    }
+
+    // A binary blob response (save-states, downloads, generated files). The body is
+    // byte-exact — std::string carries NULs and high bytes fine; this helper just
+    // pairs the bytes with a Content-Type. The inbound mirror is Request.body, which
+    // the server reads by Content-Length, so it is equally binary-safe.
+    static Response bytes(const void* data, std::size_t len,
+                          const std::string& content_type = "application/octet-stream",
+                          int status = 200) {
+        Response r;
+        r.status = status;
+        r.body.assign(static_cast<const char*>(data), len);
+        r.headers["Content-Type"] = content_type;
+        return r;
+    }
+    static Response bytes(std::string data,
+                          const std::string& content_type = "application/octet-stream",
+                          int status = 200) {
+        Response r;
+        r.status = status;
+        r.body = std::move(data);
+        r.headers["Content-Type"] = content_type;
         return r;
     }
 };

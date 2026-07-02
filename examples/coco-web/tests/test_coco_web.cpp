@@ -89,4 +89,35 @@ TEST(cocoweb_write_requires_token_with_ability) {
     CHECK(has(app.kernel->handle(req("GET", "/api/items")).body, "third"));
 }
 
+
+TEST(cocoweb_savestate_binary_roundtrip) {
+    auto app = make_app();
+
+    // A machine-snapshot-shaped blob: NULs, high bytes, not valid UTF-8 anywhere.
+    std::string blob;
+    for (int i = 0; i < 512; ++i) blob.push_back(static_cast<char>(i % 256));
+
+    // Writes are gated on the "saves:write" ability (requires_ability answers 403).
+    CHECK_EQ(app.kernel->handle(req("POST", "/api/savestates?name=level1", blob)).status, 403);
+
+    tok::Claims c;
+    c.sub = "coco";
+    c.abilities = {"saves:write"};
+    auto created =
+        app.kernel->handle(req("POST", "/api/savestates?name=level1", blob, tok::sign(c, kSecret)));
+    CHECK_EQ(created.status, 201);
+    auto idpos = created.body.find(":");
+    std::string id = created.body.substr(idpos + 1, created.body.find("}") - idpos - 1);
+
+    // GET returns the blob byte-for-byte via Response::bytes.
+    auto got = app.kernel->handle(req("GET", "/api/savestates/" + id));
+    CHECK_EQ(got.status, 200);
+    CHECK_EQ(got.headers.at("Content-Type"), std::string("application/octet-stream"));
+    CHECK_EQ(got.body.size(), blob.size());
+    CHECK(got.body == blob); // byte-exact, incl. NULs + high bytes
+
+    CHECK_EQ(app.kernel->handle(req("GET", "/api/savestates/999")).status, 404);
+    CHECK_EQ(app.kernel->handle(req("GET", "/api/savestates/junk")).status, 422);
+}
+
 int main() { return RUN_ALL_TESTS(); }

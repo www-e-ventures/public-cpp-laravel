@@ -13,6 +13,8 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "http.hpp"
 #include "router_contract.hpp"
@@ -21,7 +23,20 @@ namespace staticfiles {
 
 struct Options {
     std::string cache_control = "public, max-age=3600";
+    // Extra headers stamped on EVERY response served (200/206/304/416 alike). The
+    // driving case is multithreaded WASM: SharedArrayBuffer needs cross-origin
+    // isolation on the document AND the module, i.e.
+    //   {"Cross-Origin-Opener-Policy", "same-origin"},
+    //   {"Cross-Origin-Embedder-Policy", "require-corp"}
+    // on the mount serving both the .html and the .wasm.
+    std::vector<std::pair<std::string, std::string>> extra_headers{};
 };
+
+namespace detail {
+inline void apply_extra(Response& r, const Options& opts) {
+    for (const auto& h : opts.extra_headers) r.headers[h.first] = h.second;
+}
+} // namespace detail
 
 // Content-Type from a file extension. Browsers require application/wasm for
 // WebAssembly.instantiateStreaming, so that one matters most here.
@@ -129,6 +144,7 @@ inline Response serve(const std::string& root, const std::string& rel_path, cons
         Response r;
         r.status = 304;
         r.headers = {{"ETag", etag}, {"Cache-Control", opts.cache_control}};
+        detail::apply_extra(r, opts);
         return r;
     }
 
@@ -139,6 +155,7 @@ inline Response serve(const std::string& root, const std::string& rel_path, cons
             Response r;
             r.status = 416;
             r.headers = {{"Content-Range", "bytes */" + std::to_string(size)}};
+            detail::apply_extra(r, opts);
             return r;
         }
         if (rg.satisfiable) {
@@ -157,6 +174,7 @@ inline Response serve(const std::string& root, const std::string& rel_path, cons
                          {"Accept-Ranges", "bytes"},
                          {"Cache-Control", opts.cache_control},
                          {"ETag", etag}};
+            detail::apply_extra(r, opts);
             return r;
         }
     }
@@ -170,6 +188,7 @@ inline Response serve(const std::string& root, const std::string& rel_path, cons
                  {"Accept-Ranges", "bytes"},
                  {"Cache-Control", opts.cache_control},
                  {"ETag", etag}};
+    detail::apply_extra(r, opts);
     return r;
 }
 

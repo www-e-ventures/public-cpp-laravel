@@ -143,4 +143,62 @@ TEST(sqlite_rejects_unsafe_identifiers) {
     CHECK(threw);
 }
 
+
+// update_if is one UPDATE ... WHERE id = ? AND guard = ? — the database makes the
+// compare-and-set atomic, so racing queue workers claim a job exactly once.
+TEST(sqlite_update_if_compare_and_set) {
+    auto conn = std::make_shared<SqliteConnection>(":memory:");
+    Migrator(*conn).run(migrations());
+    ArticleRepository repo(conn);
+    Article a{0, "claimable", 0, false};
+    repo.insert(a);
+
+    Row claim;
+    claim.set("title", std::string("claimable"));
+    claim.set("views", std::int64_t{1});
+    claim.set("published", false);
+
+    CHECK(conn->update_if("articles", a.id, "views", Value{std::int64_t{0}}, claim));
+    CHECK(!conn->update_if("articles", a.id, "views", Value{std::int64_t{0}}, claim)); // moved on
+    CHECK_EQ(repo.find(a.id)->views, std::int64_t{1});
+}
+
+TEST(sqlite_transaction_rolls_back_on_throw) {
+    auto conn = std::make_shared<SqliteConnection>(":memory:");
+    Migrator(*conn).run(migrations());
+    ArticleRepository repo(conn);
+    Article keep{0, "keep", 1, true};
+    repo.insert(keep);
+
+    bool threw = false;
+    try {
+        transaction(*conn, [&] {
+            Article gone{0, "gone", 2, true};
+            repo.insert(gone);
+            throw std::runtime_error("halfway failure");
+        });
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    CHECK(threw);
+    CHECK_EQ(repo.all().size(), n(1)); // BEGIN..ROLLBACK unwound the second insert
+    CHECK(repo.find(keep.id).has_value());
+}
+
+// A refused INSERT throws (with SQLite's message) instead of returning a bogus id 0.
+TEST(sqlite_insert_failure_throws) {
+    auto conn = std::make_shared<SqliteConnection>(":memory:");
+    Migrator(*conn).run(migrations());
+
+    bool threw = false;
+    try {
+        Row r;
+        r.set("no_such_column", std::string("x"));
+        conn->insert("articles", std::move(r));
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
 int main() { return RUN_ALL_TESTS(); }

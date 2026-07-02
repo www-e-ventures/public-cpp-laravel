@@ -151,3 +151,23 @@ TEST(http_format_response_new_reason_phrases) {
     CHECK(has(format_http_response(Response{413, "x"}), "413 Payload Too Large"));
     CHECK(has(format_http_response(Response{431, "x"}), "431 Request Header Fields Too Large"));
 }
+
+TEST(http_response_bytes_is_binary_safe) {
+    std::string blob;
+    blob.push_back('\0');
+    blob += "\x01\xff";
+    blob.push_back('\0');
+
+    Response r = Response::bytes(blob.data(), blob.size());
+    CHECK_EQ(r.status, 200);
+    CHECK_EQ(r.headers.at("Content-Type"), std::string("application/octet-stream"));
+    CHECK_EQ(r.body.size(), blob.size()); // NULs survive
+    CHECK(r.body == blob);
+
+    Response typed = Response::bytes(blob, "application/x-savestate", 201);
+    CHECK_EQ(typed.status, 201);
+    CHECK_EQ(typed.headers.at("Content-Type"), std::string("application/x-savestate"));
+
+    // format_http_response counts bytes, not C-string length.
+    CHECK(has(format_http_response(r), "Content-Length: 4"));
+}
