@@ -521,4 +521,56 @@ TEST(websocket_connection_echoes_peer_close_code) {
     ::close(sv[1]);
 }
 
+
+TEST(websocket_origin_allowlist_gates_handshake) {
+    // Allowed origin: the upgrade proceeds normally.
+    {
+        int sv[2];
+        CHECK(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+        Request req;
+        req.headers["Sec-WebSocket-Key"] = "dGhlIHNhbXBsZSBub25jZQ==";
+        req.headers["Origin"] = "https://bbs.example";
+        ws::Connection conn(sv[0], req);
+        conn.set_allowed_origins({"https://bbs.example", "https://coco.example"});
+        CHECK(conn.handshake());
+        char buf[512];
+        ssize_t n = ::recv(sv[1], buf, sizeof(buf), 0);
+        CHECK(n > 0);
+        CHECK(std::string(buf, static_cast<std::size_t>(n)).find("101 Switching Protocols") !=
+              std::string::npos);
+        conn.close();
+        ::close(sv[1]);
+    }
+    // Foreign origin (a hostile page scripting a WS with the victim's cookies):
+    // refused with a 403, no upgrade.
+    {
+        int sv[2];
+        CHECK(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+        Request req;
+        req.headers["Sec-WebSocket-Key"] = "dGhlIHNhbXBsZSBub25jZQ==";
+        req.headers["Origin"] = "https://evil.example";
+        ws::Connection conn(sv[0], req);
+        conn.set_allowed_origins({"https://bbs.example"});
+        CHECK(!conn.handshake());
+        char buf[512];
+        ssize_t n = ::recv(sv[1], buf, sizeof(buf), 0);
+        CHECK(n > 0);
+        CHECK(std::string(buf, static_cast<std::size_t>(n)).find("403 Forbidden") !=
+              std::string::npos);
+        conn.close();
+        ::close(sv[1]);
+    }
+    // No allowlist (the default): any or no Origin is accepted, as before.
+    {
+        int sv[2];
+        CHECK(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+        Request req;
+        req.headers["Sec-WebSocket-Key"] = "dGhlIHNhbXBsZSBub25jZQ==";
+        ws::Connection conn(sv[0], req);
+        CHECK(conn.handshake());
+        conn.close();
+        ::close(sv[1]);
+    }
+}
+
 int main() { return RUN_ALL_TESTS(); }

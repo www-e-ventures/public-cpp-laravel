@@ -4,6 +4,34 @@ Notable changes to cpp-laravel. Versioning is semantic; a passing test suite
 (`ctest`) is the release gate. Depend on a tag and upgrade deliberately — see
 [`docs/consuming.md`](docs/consuming.md).
 
+## [0.10.0] — 2026-07-02
+
+Docs truth pass + WebSocket polish. Small and additive.
+
+### Added
+- **`ws::Connection::set_allowed_origins({...})`** — an Origin allowlist on the
+  handshake: a browser connection from an unlisted origin is answered `403` and the
+  upgrade refused. WebSockets bypass CORS, so this is the cross-site-WebSocket-
+  hijacking gate for endpoints whose auth rides on cookies. Empty (default) =
+  accept any origin, as before.
+
+### Changed
+- **`ws::Hub` broadcasts snapshot-then-send** — the hub mutex is no longer held
+  across every socket write, so one slow client can't stall the whole fan-out or
+  block `add()`/`remove()` (which also removes a lock-order hazard against a
+  connection's own send mutex). Lifetime contract documented on the class:
+  `remove(c)` before tearing down `c`.
+
+### Docs
+- README brought current through v0.9.0: request limits + error semantics, the
+  `httpauth` kit, queue + scheduler + new artisan commands, `Response::bytes`,
+  static `extra_headers`, and the full header list in Layout. New "Integrating
+  without the blocking server" section: what a reactor-based consumer reuses from
+  the pure WS codec, and the reader-thread bridge from blocking `receive()` to a
+  poll-per-tick byte stream. Honesty fixes: "soft deletes" is titled as the
+  explicit pattern it is; the dangling `HANDOFF.md` reference now points at the
+  changelog.
+
 ## [0.9.0] — 2026-07-01
 
 "The promised features" — everything the consumers pre-negotiated in the wish-list

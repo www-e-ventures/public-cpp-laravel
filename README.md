@@ -124,14 +124,23 @@ include/        framework public headers
   events.hpp      type-erased event dispatcher             (Illuminate\Events)
   cache.hpp       cache contract + array store             (Illuminate\Contracts\Cache)
   queue.hpp       queue contract + sync/array drivers      (Illuminate\Contracts\Queue)
+  db_queue.hpp    database queue driver (atomic claims)    (the "database" queue driver)
+  scheduler.hpp   cron-style Schedule (every / daily_at)   (Illuminate\Console\Scheduling)
   mail.hpp        mailer contract + array driver           (Illuminate\Contracts\Mail)
-  session.hpp     session store + handle                   (Illuminate\Session)
+  session.hpp     session store + handle (CSPRNG ids)      (Illuminate\Session)
   auth.hpp        session guard + user provider            (Illuminate\Auth\SessionGuard)
+  http_auth.hpp   session cookies / CSRF / login / throttle (StartSession + VerifyCsrfToken + ...)
   gate.hpp        authorization gates                      (Illuminate\Auth\Access\Gate)
+  pbkdf2_hash.hpp PBKDF2 password hasher (OpenSSL-gated)   (Hash::make, production-grade)
+  token.hpp       HS256 signed tokens + ability middleware (OpenSSL-gated; JWT-ish)
+  personal_access_token.hpp  hashed-at-rest API tokens     (OpenSSL-gated; Sanctum-lite)
   view.hpp        Blade-lite engine + Views registry       (Illuminate\View / Blade)
   livewire.hpp    server-side reactive components          (Livewire)
   testing.hpp     Laravel-flavoured HTTP test DSL          (Illuminate\Testing)
-  http_server.hpp minimal HTTP/1.1 server (thread pool)    (the dev server)
+  http_server.hpp minimal HTTP/1.1 server (thread pool, limits) (the dev server)
+  static_files.hpp  MIME / Range / ETag / extra headers    (static file serving)
+  websocket.hpp   pure RFC 6455 codec (frames, accept key) (OpenSSL-gated)
+  websocket_server.hpp  Connection / Hub / run_terminal    (OpenSSL-gated socket layer)
   test_harness.hpp / generators.hpp   test harness + make:* scaffolding templates
 src/            framework implementations  → `framework` static lib (zero-dep)
                 + sqlite_connection.cpp    → `framework_sqlite` lib (optional)
@@ -180,6 +189,16 @@ Binaries live with their project: framework test runner at `build/framework_test
 ./build/examples/blog/cpp-artisan serve 8080 4      # 4 worker threads
 curl -s localhost:8080/articles
 curl -s -X POST -H "Authorization: secret-token" -d "title=Hi&published=1" localhost:8080/articles
+```
+
+Background work has its own commands (see "Queue & scheduler" below). `LIPP_DB=/path/app.sqlite`
+points them all at a persistent database:
+
+```sh
+./build/examples/blog/cpp-artisan migrate           # apply migrations (idempotent)
+./build/examples/blog/cpp-artisan migrate:rollback  # undo them
+./build/examples/blog/cpp-artisan schedule:run      # one scheduler tick — call from cron
+./build/examples/blog/cpp-artisan queue:work 1      # run queued jobs, poll every 1s, Ctrl-C stops
 ```
 
 `http_server.hpp` bridges sockets to the Kernel; its request parsing / response formatting are pure
@@ -315,10 +334,18 @@ the JS client is exercised in the browser. Next for Livewire: nested components 
 ## HTTP, routing & static serving
 
 `HttpServer` is a threaded, blocking HTTP/1.1 server (`Connection: close`) that bridges real sockets
-to the Kernel: read a request, `Kernel::handle` it, write the response — enough to reach the app from
-a browser or `curl`, not a production edge. `HttpServer::stop()` closes the listening socket and
-breaks the accept loop, so a server running on a background thread shuts down cleanly on
-SIGINT/SIGTERM.
+to the Kernel: read a request, `Kernel::handle` it, write the response — sized for an admin
+dashboard or a JSON API behind a reverse proxy, not a hostile internet edge. `HttpServer::stop()`
+closes the listening socket and breaks the accept loop, so a server running on a background thread
+shuts down cleanly on SIGINT/SIGTERM.
+
+The server survives misbehaviour: an exception escaping a handler or middleware becomes a plain
+`500` (logged to stderr) instead of taking down the process; `HttpServer::Limits` caps header size
+(`431`), body size (`413`, refused off the declared `Content-Length` before buffering), and stalls
+a read timeout; `Transfer-Encoding: chunked` is answered `411` rather than hung on. A path
+registered under other verbs answers `405` with an `Allow` header, and `Request.remote_addr`
+carries the peer IP for rate limiting and logging. Binary responses (save-states, downloads) are
+`Response::bytes(data, len, content_type)` — bodies are byte-exact in both directions.
 
 `Router` registers handlers with `get`/`post`/`put`/`patch`/`del` (`del`, because `delete` is a
 keyword); `add()` accepts any method string. Path params compile to a regex: `{id}` matches one
@@ -330,20 +357,52 @@ Static files (`static_files.hpp`, header-only, std-lib-only): `staticfiles::serv
 serves a file with a MIME table (notably `.wasm → application/wasm`, which browsers require for
 `WebAssembly.instantiateStreaming`), byte-range requests (`Range` → 206/416), `ETag` +
 `If-None-Match` → 304, and `Cache-Control`. Bodies are byte-exact; paths that escape `root` are
-refused. `staticfiles::mount(router, "/dist", dir)` wires a catch-all static route. `examples/coco-web/`
-puts it together — a static single-page app served next to a JSON API.
+refused. `staticfiles::mount(router, "/dist", dir)` wires a catch-all static route, and
+`Options.extra_headers` stamps custom headers on every response — the documented recipe is the
+`Cross-Origin-Opener-Policy` + `Cross-Origin-Embedder-Policy` pair a `SharedArrayBuffer`/threaded
+WASM app needs on both its HTML and its module. `examples/coco-web/` puts it together — a static
+single-page app served next to a JSON API (including binary save-state endpoints).
 
 WebSocket (`websocket.hpp` / `websocket_server.hpp`, OpenSSL-gated for the SHA-1 accept key):
 `HttpServer::on_websocket(path, handler)` hands an Upgrade request's raw socket to a handler;
 `ws::Connection` does the RFC 6455 handshake and per-connection frame loop (text/binary,
-ping/pong/close, and reassembly of fragmented messages), and `ws::Hub` broadcasts to every open
-connection. The framework core stays OpenSSL-free — the handler opts into the crypto.
+ping/pong/close with the peer's status code echoed, and reassembly of fragmented messages), and
+`ws::Hub` broadcasts to every open connection (snapshot-then-send, so one slow client doesn't
+stall the fan-out). Protocol hygiene is enforced: a frame header declaring more than the
+per-connection message cap closes with `1009` before the payload is ever buffered, unmasked
+client frames are refused with `1002` (RFC 6455 §5.1; `set_require_masked(false)` for
+server-to-server peers), and `set_allowed_origins({...})` rejects cross-site browser connections
+with a `403` when the endpoint's auth rides on cookies. The framework core stays OpenSSL-free —
+the handler opts into the crypto.
+
+**Integrating without the blocking server.** `ws::Connection` parks a thread per connection —
+right for the dev server, wrong for an app with its own event loop. A reactor-based consumer
+(epoll, coroutines) can skip it and reuse the *pure* layer directly: `ws::accept_key` for the
+handshake, `ws::parse_frame` for opcode-aware decoding off its own buffers (including
+fragmentation reassembly state and the declared-length cap), and `ws::encode_text` /
+`encode_binary` / `encode_close(code)` / `encode_pong` for output — no threads, no sockets, no
+opinions. Conversely, an app whose I/O is a poll-per-tick byte stream (an emulator's serial port)
+bridges to the blocking layer with a reader thread: `receive()` drains whole messages into a byte
+queue the tick loop pops one byte at a time, and per-tick output is coalesced into a single
+`send_binary()` (sends are mutex-serialised, so pushing from the tick thread while the reader is
+parked in `receive()` is safe).
 
 ## Auth, sessions & tokens
 
 Session auth is a `SessionGuard` over a session store (`auth.hpp`, `session.hpp`); authorization is
 gates and policies (`gate.hpp`) — named abilities checked with `allows()`/`denies()`, with a
-`before()` hook for admin overrides.
+`before()` hook for admin overrides. Session ids (and CSRF tokens) are CSPRNG-generated (128 bits
+from `/dev/urandom`); the in-memory store is mutex-guarded, supports an idle TTL with `gc()`, and
+`Session::regenerate_id()` moves a session under a fresh id — the session-fixation defense. The
+password hasher is injectable: the dependency-free default demonstrates the salt+verify shape, and
+`Pbkdf2Hasher` (OpenSSL-gated) drops in behind the same `HashContract` for production passwords.
+
+The HTTP wiring for all of this is `http_auth.hpp` (zero-dep, header-only, `httpauth::`): a
+session-cookie middleware with configurable `HttpOnly`/`Secure`/`SameSite` flags, CSRF mint +
+verify (constant-time compare, `419`), a `require_auth` route guard (`401`), `attempt_login`
+(regenerates the session id on success and re-issues the cookie), `logout` (full session flush),
+and a fixed-window rate limiter keyed on the client IP. One audited copy instead of a per-app
+re-implementation — `examples/blog` wires it end to end.
 
 For APIs and cross-service identity there's an optional, OpenSSL-gated token layer (next to the
 PBKDF2 hasher; the core stays dependency-free):
@@ -359,6 +418,22 @@ PBKDF2 hasher; the core stays dependency-free):
 
 Abilities are plain strings with no built-in vocabulary — you define `room:*`, `post`, `api:read`, …
 and the same language works across signed tokens, PATs, and gates.
+
+## Queue & scheduler
+
+`DbQueue` (`db_queue.hpp`) persists named jobs through the ORM `Connection` — the "database" queue
+driver. Jobs support delays (`push(job, payload, delay)`), failed attempts back off and land in
+`failed_jobs` at max attempts, and `work()` claims each due job with an atomic compare-and-set
+(`Connection::update_if`), so several workers — threads or separate processes on one database —
+never double-process; a job orphaned by a crashed worker is reclaimed after a timeout. The clock is
+injectable, so none of it needs sleeps to test.
+
+`Schedule` (`scheduler.hpp`) is the cron side: `every(seconds, name, fn)` and
+`daily_at("HH:MM", name, fn)` (local time — a tick that comes late still runs today's task, once),
+driven by `run_pending()` from real cron, a loop thread, or `cpp-artisan schedule:run`. Last-run
+stamps persist through the `Connection`, so restarts don't double-fire. The intended pairing:
+scheduled fns just `push()` jobs; `cpp-artisan queue:work` does the lifting. Transactions are
+available on the same contract — `transaction(conn, fn)` commits on return and rolls back on throw.
 
 ## Boundaries (contracts)
 
@@ -590,7 +665,7 @@ round-trips it through a `MemoryConnection` (run `ctest`). The boilerplate is fu
 once a project has many models, drop the hand-written mappers and generate them; at two or three
 models, hand-writing is still fine. Build is gated on `libclang-dev`.
 
-### Relationships & soft deletes
+### Relationships & explicit soft deletes (a pattern, not a trait)
 
 Relationships are explicit (`include/relations.hpp`), no `$model->comments` magic — each is a free
 function returning a scoped `QueryBuilder` you can chain:

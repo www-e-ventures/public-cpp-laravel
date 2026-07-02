@@ -28,6 +28,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <vector>
 
 #include "http.hpp"
 #include "websocket.hpp"
@@ -58,7 +59,9 @@ inline std::string header_ci(const Request& req, const std::string& name) {
 class Connection {
 public:
     Connection(int fd, const Request& req)
-        : fd_(fd), client_key_(header_ci(req, "Sec-WebSocket-Key")) {}
+        : fd_(fd),
+          client_key_(header_ci(req, "Sec-WebSocket-Key")),
+          origin_(header_ci(req, "Origin")) {}
 
     Connection(const Connection&) = delete;
     Connection& operator=(const Connection&) = delete;
@@ -75,10 +78,36 @@ public:
     // is another server (or a test harness) speaking unmasked by agreement.
     void set_require_masked(bool on) { require_masked_ = on; }
 
+    // Restrict the browsers allowed to open this connection. Browsers always send
+    // an Origin header, so if the endpoint's auth rides on cookies, an allowlist
+    // stops any other website from scripting a WebSocket to it with the victim's
+    // session (cross-site WebSocket hijacking — WebSockets bypass CORS). Empty
+    // (the default) = accept any origin, which is fine for token-in-URL or public
+    // endpoints. Set it BEFORE handshake(); a mismatch answers 403 and refuses
+    // the upgrade. Non-browser clients (no Origin header) are refused too when an
+    // allowlist is set — this gate is specifically about cookie-bearing browsers.
+    void set_allowed_origins(std::vector<std::string> origins) {
+        allowed_origins_ = std::move(origins);
+    }
+
     // Complete the RFC 6455 handshake: reply 101 with the computed accept key.
-    // Returns false if the request had no Sec-WebSocket-Key or the write failed.
+    // Returns false if the request had no Sec-WebSocket-Key, the Origin isn't
+    // allowed (403 sent), or the write failed.
     bool handshake() {
         if (client_key_.empty()) return false;
+        if (!allowed_origins_.empty()) {
+            bool ok = false;
+            for (const auto& o : allowed_origins_) {
+                if (o == origin_) {
+                    ok = true;
+                    break;
+                }
+            }
+            if (!ok) {
+                send_all("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+                return false;
+            }
+        }
         const std::string resp =
             "HTTP/1.1 101 Switching Protocols\r\n"
             "Upgrade: websocket\r\n"
@@ -203,15 +232,26 @@ private:
 
     int fd_;
     std::string client_key_;
+    std::string origin_;     // the Origin header as presented (empty if none)
     std::string buf_;        // unconsumed bytes read from the socket
     std::mutex send_mutex_;  // serialises writes (owner thread + Hub broadcasts)
     std::size_t max_message_bytes_ = 1024 * 1024;
+    std::vector<std::string> allowed_origins_;
     bool require_masked_ = true;
 };
 
 // A thread-safe registry of open connections — the fan-out point for
 // "broadcast this to everyone" (pair with Broadcaster's channel events). Register
 // a connection for its lifetime; broadcast() pushes one text frame to each.
+//
+// Broadcasts snapshot the registry, then send with the hub UNLOCKED: one slow
+// receiver must not stall every other client, nor block add()/remove() (which a
+// closing connection's thread calls — holding the hub lock across sends was a
+// lock-order hazard against Connection's own send mutex). The trade: a connection
+// removed mid-broadcast may still get (or miss) that one frame. Lifetime contract,
+// unchanged: remove(c) before destroying/closing c — remove() returning means no
+// broadcast will touch c afterwards, but a broadcast already in flight may, so
+// remove BEFORE the Connection is torn down, not after.
 class Hub {
 public:
     void add(Connection* c) {
@@ -223,12 +263,10 @@ public:
         conns_.erase(c);
     }
     void broadcast(const std::string& text) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        for (Connection* c : conns_) c->send_text(text);
+        for (Connection* c : snapshot()) c->send_text(text);
     }
     void broadcast_binary(const std::string& bytes) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        for (Connection* c : conns_) c->send_binary(bytes);
+        for (Connection* c : snapshot()) c->send_binary(bytes);
     }
     std::size_t size() const {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -236,6 +274,11 @@ public:
     }
 
 private:
+    std::vector<Connection*> snapshot() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return std::vector<Connection*>(conns_.begin(), conns_.end());
+    }
+
     mutable std::mutex mutex_;
     std::set<Connection*> conns_;
 };
