@@ -80,7 +80,7 @@ public:
         Query base = query_;
         base.limit.reset();
         base.offset.reset();
-        std::size_t total = conn_->select(Mapper::table(), base).size();
+        std::size_t total = conn_->count(Mapper::table(), base);
 
         Query q = base;
         q.limit = per_page;
@@ -106,7 +106,9 @@ public:
         return Mapper::hydrate(rows.front());
     }
 
-    std::size_t count() const { return conn_->select(Mapper::table(), query_).size(); }
+    // Delegates to Connection::count — a SQL backend answers with COUNT(*) instead
+    // of loading (and hydrating) every matching row to measure the vector.
+    std::size_t count() const { return conn_->count(Mapper::table(), query_); }
 
 private:
     static const std::string& checked(const std::string& column) {

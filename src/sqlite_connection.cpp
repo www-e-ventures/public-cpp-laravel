@@ -66,6 +66,32 @@ std::string ident(const std::string& name) {
     return name;
 }
 
+// The WHERE clause shared by select() and count(): splice guarded identifiers and
+// `?` marks into `sql`, then bind the values in the same order.
+void append_wheres(std::string& sql, const Query& query) {
+    for (std::size_t i = 0; i < query.wheres.size(); ++i) {
+        const auto& w = query.wheres[i];
+        sql += (i == 0 ? " WHERE " : " AND ");
+        if (w.op == Op::In) {
+            sql += ident(w.column) + " IN (";
+            for (std::size_t j = 0; j < w.values.size(); ++j) sql += (j ? ",?" : "?");
+            sql += ")";
+        } else {
+            sql += ident(w.column) + " " + op_sql(w.op) + " ?";
+        }
+    }
+}
+
+void bind_wheres(sqlite3_stmt* stmt, const Query& query) {
+    int idx = 1;
+    for (const auto& w : query.wheres) {
+        if (w.op == Op::In)
+            for (const auto& v : w.values) bind_value(stmt, idx++, v);
+        else
+            bind_value(stmt, idx++, w.value);
+    }
+}
+
 } // namespace
 
 SqliteConnection::SqliteConnection(const std::string& path) {
@@ -129,17 +155,7 @@ std::vector<Row> SqliteConnection::all(const std::string& table) const {
 std::vector<Row> SqliteConnection::select(const std::string& table, const Query& query) const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::string sql = "SELECT * FROM " + ident(table);
-    for (std::size_t i = 0; i < query.wheres.size(); ++i) {
-        const auto& w = query.wheres[i];
-        sql += (i == 0 ? " WHERE " : " AND ");
-        if (w.op == Op::In) {
-            sql += ident(w.column) + " IN (";
-            for (std::size_t j = 0; j < w.values.size(); ++j) sql += (j ? ",?" : "?");
-            sql += ")";
-        } else {
-            sql += ident(w.column) + " " + op_sql(w.op) + " ?";
-        }
-    }
+    append_wheres(sql, query);
     if (query.order)
         sql += " ORDER BY " + ident(query.order->column) + (query.order->descending ? " DESC" : " ASC");
     if (query.limit) sql += " LIMIT " + std::to_string(*query.limit);
@@ -151,16 +167,27 @@ std::vector<Row> SqliteConnection::select(const std::string& table, const Query&
     std::vector<Row> rows;
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return rows;
-    int idx = 1;
-    for (const auto& w : query.wheres) {
-        if (w.op == Op::In)
-            for (const auto& v : w.values) bind_value(stmt, idx++, v);
-        else
-            bind_value(stmt, idx++, w.value);
-    }
+    bind_wheres(stmt, query);
     while (sqlite3_step(stmt) == SQLITE_ROW) rows.push_back(read_row(stmt));
     sqlite3_finalize(stmt);
     return rows;
+}
+
+std::size_t SqliteConnection::count(const std::string& table, const Query& query) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // The database counts; no rows travel. Same guarded identifiers and bound
+    // values as select(); order/limit/offset don't apply to a count.
+    std::string sql = "SELECT COUNT(*) FROM " + ident(table);
+    append_wheres(sql, query);
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return 0;
+    bind_wheres(stmt, query);
+    std::size_t n = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        n = static_cast<std::size_t>(sqlite3_column_int64(stmt, 0));
+    sqlite3_finalize(stmt);
+    return n;
 }
 
 bool SqliteConnection::update(const std::string& table, std::int64_t id, const Row& row) {

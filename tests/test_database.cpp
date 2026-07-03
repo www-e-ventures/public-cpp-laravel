@@ -70,3 +70,22 @@ TEST(database_transaction_rolls_back_on_throw) {
     std::int64_t id = seed_job(c, 0);
     CHECK_EQ(id, std::int64_t{2});
 }
+
+TEST(database_count_matches_wheres_and_ignores_paging) {
+    MemoryConnection c;
+    for (int i = 0; i < 5; ++i) seed_job(c, i < 3 ? 0 : 9);
+
+    CHECK_EQ(c.count("jobs"), static_cast<std::size_t>(5));
+
+    Query unclaimed;
+    unclaimed.wheres.push_back({"reserved_at", Op::Eq, Value{std::int64_t{0}}});
+    CHECK_EQ(c.count("jobs", unclaimed), static_cast<std::size_t>(3));
+
+    // "How many match" must not shrink because a page size was set on the query.
+    Query paged = unclaimed;
+    paged.limit = 1;
+    paged.offset = 1;
+    CHECK_EQ(c.count("jobs", paged), static_cast<std::size_t>(3));
+
+    CHECK_EQ(c.count("no_such_table"), static_cast<std::size_t>(0));
+}

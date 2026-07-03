@@ -32,6 +32,9 @@ public:
     bool remove(const std::string& table, std::int64_t id) override;
     void statement(const std::string& sql) override;
 
+    // SELECT COUNT(*) — the database produces the scalar; no rows are loaded.
+    std::size_t count(const std::string& table, const Query& query = {}) const override;
+
     // One UPDATE ... WHERE id = ? AND guard = ? — atomic in the database, the
     // queue's claim primitive.
     bool update_if(const std::string& table, std::int64_t id, const std::string& guard_col,

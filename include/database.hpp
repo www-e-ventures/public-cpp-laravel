@@ -120,6 +120,18 @@ public:
         return update(table, id, row);
     }
 
+    // Rows matching `query` — wheres only; order/limit/offset are ignored (a count
+    // has no order, and "how many match" shouldn't change because a page size was
+    // set). The default is the portable read-everything fallback; SQL backends
+    // override with SELECT COUNT(*) so producing a scalar stops loading whole rows.
+    virtual std::size_t count(const std::string& table, const Query& query = {}) const {
+        Query q = query;
+        q.order.reset();
+        q.limit.reset();
+        q.offset.reset();
+        return select(table, q).size();
+    }
+
     // Transactions. Defaults are no-ops so schemaless/custom backends keep compiling;
     // SqliteConnection maps them to BEGIN/COMMIT/ROLLBACK and MemoryConnection to a
     // snapshot/restore. No nesting. Note the threading caveat: the shipped backends

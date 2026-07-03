@@ -95,9 +95,33 @@ Three reasons it's interesting:
 2. **Speed** — a compiled request lifecycle, no per-request bytecode interpretation.
 3. **Learning** — pressure-testing how far Laravel's DX survives translation.
 
-It's a curiosity project, not a production framework: there's no CI, no adoption to speak of, and
-clarity plus honest trade-off documentation matter more than feature completeness. The demo
-credentials (`ada`/`secret`, `secret-token`) are exactly that — demo values.
+It's a curiosity project first: there's no CI, and clarity plus honest trade-off documentation
+matter more than feature completeness — though it does have real consumers now (next section).
+The demo credentials (`ada`/`secret`, `secret-token`) are exactly that — demo values.
+
+## In the wild
+
+Two independent applications run on this framework, with deliberately opposite architectures —
+which is the real test of the boundaries:
+
+- **A 1990s-style bulletin board system** (telnet / web / dial-up modem / LoRa radio, one
+  ANSI/CP437 byte stream) runs its interactive transports on its own epoll + C++20-coroutine
+  reactor and **vendors the framework core** (`add_subdirectory`, offline builds) for everything
+  request-shaped: the sysop dashboard and JSON API on `HttpServer`, the ORM + migrations, and the
+  whole identity surface — hashed personal access tokens, HS256 "room" tokens another backend
+  verifies with no shared database, admin sessions on `http_auth.hpp`, and daily-turn door games
+  on the scheduler.
+- **A Tandy Color Computer 3/4 emulator** compiles to WebAssembly with Emscripten and is **served
+  by the framework** (FetchContent of a version tag): the multi-MB `.wasm` over static serving
+  (correct MIME, `Range`, `ETag`), a JSON API, and versioned binary save-states over
+  `Response::bytes`.
+
+The vendoring consumer has upgraded across five consecutive releases (v0.5.0 → v0.10.0) with
+**zero source changes** — the additive-semver contract holding in practice, not just in the
+changelog. The two apps also meet in the middle: the BBS exposes a `/terminal` WebSocket endpoint
+streaming raw CP437/ANSI in binary frames, and the emulator's terminal speaks it through a
+byte-stream bridge — a genuine CoCo caller dialing a genuine BBS from a browser. (Both apps live
+in private repositories today; links will appear here when they open up.)
 
 ## Layout
 
@@ -381,7 +405,10 @@ right for the dev server, wrong for an app with its own event loop. A reactor-ba
 handshake, `ws::parse_frame` for opcode-aware decoding off its own buffers (including
 fragmentation reassembly state and the declared-length cap), and `ws::encode_text` /
 `encode_binary` / `encode_close(code)` / `encode_pong` for output — no threads, no sockets, no
-opinions. Conversely, an app whose I/O is a poll-per-tick byte stream (an emulator's serial port)
+opinions. One duty comes with that freedom: the framework can only turn exceptions into `500`s
+for work that runs *inside* it — a reactor needs its own containment at the detached-coroutine
+boundary, or one throwing session takes down the daemon (catch, log, let the one session die).
+Conversely, an app whose I/O is a poll-per-tick byte stream (an emulator's serial port)
 bridges to the blocking layer with a reader thread: `receive()` drains whole messages into a byte
 queue the tick loop pops one byte at a time, and per-tick output is coalesced into a single
 `send_binary()` (sends are mutex-serialised, so pushing from the tick thread while the reader is

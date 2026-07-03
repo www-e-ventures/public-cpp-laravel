@@ -4,6 +4,31 @@ Notable changes to cpp-laravel. Versioning is semantic; a passing test suite
 (`ctest`) is the release gate. Depend on a tag and upgrade deliberately — see
 [`docs/consuming.md`](docs/consuming.md).
 
+## [0.11.0] — 2026-07-03
+
+The first consumer-driven release: everything here came from adopter feedback
+(wish-list thread files 12–13).
+
+### Added
+- **`Connection::count(table, query)`** — the aggregate the contract was missing
+  (asked for, spec and all, by the BBS after finding its stats queries loaded whole
+  tables to produce a number). Virtual with a portable read-everything default —
+  wheres apply; order/limit/offset are ignored — and `SqliteConnection` overrides
+  with `SELECT COUNT(*)` through the same bound-value + guarded-identifier
+  machinery as `select()`. `QueryBuilder::count()` and `paginate()` (its total)
+  delegate, so every consumer inherits the fix: counting no longer loads rows on a
+  SQL backend. Deliberately no `sum/avg/min/max` — no one has needed them yet.
+
+### Docs
+- "Integrating without the blocking server" now states the containment duty a
+  reactor consumer keeps: the framework can only 500 what runs inside it — catch at
+  the detached-coroutine boundary or one throwing session takes the daemon
+  (contributed from the BBS's own post-adoption fix).
+- New **"In the wild"** README section: the two production consumers (a
+  reactor-based BBS vendoring the core; a WASM CoCo emulator served via
+  FetchContent), the zero-source-change upgrade record across five releases, and
+  the terminal bridge where the two meet.
+
 ## [0.10.0] — 2026-07-02
 
 Docs truth pass + WebSocket polish. Small and additive.

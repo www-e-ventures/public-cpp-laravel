@@ -201,4 +201,29 @@ TEST(sqlite_insert_failure_throws) {
     CHECK(threw);
 }
 
+
+// count() runs as SELECT COUNT(*) in the database — no rows load — through the
+// same bound-value + guarded-identifier machinery as select().
+TEST(sqlite_count_is_a_sql_aggregate) {
+    auto conn = std::make_shared<SqliteConnection>(":memory:");
+    Migrator(*conn).run(migrations());
+    ArticleRepository repo(conn);
+    for (int i = 1; i <= 4; ++i) {
+        Article a{0, "post-" + std::to_string(i), i, i % 2 == 0};
+        repo.insert(a);
+    }
+
+    CHECK_EQ(conn->count("articles"), n(4));
+    CHECK_EQ(repo.query().where("published", Value{true}).count(), n(2));
+    CHECK_EQ(repo.query().where("views", Op::Gte, Value{std::int64_t{3}}).count(), n(2));
+
+    bool threw = false;
+    try {
+        conn->count("articles; DROP TABLE articles");
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    CHECK(threw); // the identifier guard covers the aggregate too
+}
+
 int main() { return RUN_ALL_TESTS(); }
