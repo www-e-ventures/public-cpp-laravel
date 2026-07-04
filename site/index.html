@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Laravel-in-C++ — the Laravel lifecycle, compiled. Running in your browser, right now.</title>
+  <meta name="description" content="A Laravel-shaped web framework in C++20: container, routing, middleware, ORM, Blade views, auth, queue. This page runs the real framework as WebAssembly — no server involved.">
+  <style>
+    :root {
+      --ink: #1a2332; --paper: #fbfaf7; --dim: #5b6472; --line: #e3e0d8;
+      --accent: #b7412a; --code-bg: #14181f; --code-ink: #9fe8c5;
+    }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; color: var(--ink); background: var(--paper); line-height: 1.55; }
+    main { max-width: 880px; margin: 0 auto; padding: 0 1.2rem 4rem; }
+    a { color: var(--accent); }
+    code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: .92em; background: #efece4; padding: .05rem .35rem; border-radius: 4px; }
+    pre { background: var(--code-bg); color: var(--code-ink); padding: 1rem 1.1rem; border-radius: 10px; overflow-x: auto; line-height: 1.45; }
+    pre code { background: none; padding: 0; color: inherit; }
+    h1 { font-size: 2rem; line-height: 1.2; margin: 2.8rem 0 .4rem; letter-spacing: -.02em; }
+    h2 { font-size: 1.25rem; margin: 2.6rem 0 .6rem; }
+    .kicker { color: var(--accent); font-weight: 600; font-size: .85rem; text-transform: uppercase; letter-spacing: .08em; margin-top: 3rem; }
+    .lede { font-size: 1.12rem; color: var(--dim); max-width: 640px; }
+    .lede strong { color: var(--ink); }
+
+    .demo { border: 1px solid var(--line); border-radius: 14px; padding: 1.1rem 1.2rem 1.2rem; margin: 1.8rem 0; background: #fff; box-shadow: 0 1px 4px rgba(26,35,50,.05); }
+    .demo h2 { margin-top: .2rem; }
+    .row { display: flex; gap: .5rem; margin: .7rem 0; flex-wrap: wrap; align-items: center; }
+    input, select, button { font: inherit; padding: .5rem .65rem; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+    button { background: var(--ink); color: #fff; border: none; cursor: pointer; }
+    button:hover { background: #2c3a52; }
+    button.quiet { background: #efece4; color: var(--ink); }
+    #out { min-height: 7.5rem; white-space: pre-wrap; margin: .8rem 0 .4rem; }
+    .muted { color: var(--dim); font-size: .9rem; }
+    .stat { font-weight: 600; color: var(--accent); }
+
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: .9rem; margin: 1rem 0; padding: 0; list-style: none; }
+    .grid li { border: 1px solid var(--line); border-radius: 10px; padding: .8rem .9rem; background: #fff; font-size: .95rem; }
+    .grid b { display: block; margin-bottom: .15rem; }
+
+    .wild { border-left: 3px solid var(--accent); padding: .1rem 0 .1rem 1.1rem; margin: 1.2rem 0; }
+    .wild p { margin: .55rem 0; }
+    footer { margin-top: 3.5rem; padding-top: 1.2rem; border-top: 1px solid var(--line); color: var(--dim); font-size: .88rem; }
+  </style>
+</head>
+<body>
+<main>
+  <div class="kicker">Laravel-in-C++</div>
+  <h1>The Laravel request lifecycle, compiled.<br>It's running on this page right now.</h1>
+  <p class="lede">A Laravel-shaped web framework in modern C++20 — service container with autowiring,
+  routing + middleware, an Eloquent-style ORM, Blade views, Livewire-style components, auth,
+  sessions, signed tokens, a queue and scheduler. <strong>The demo below is not a video and not a
+  mock: it's the actual framework, compiled to a 356&nbsp;KB WebAssembly module, handling requests
+  inside your browser tab.</strong> No server is involved; the request never leaves the page.</p>
+
+  <div class="demo">
+    <h2>Drive it</h2>
+    <div class="row">
+      <select id="method"><option>GET</option><option>POST</option></select>
+      <input id="path" value="/articles" size="20" aria-label="request path">
+      <input id="body" placeholder="title=Hi&amp;published=1" size="24" aria-label="request body">
+      <button onclick="send()">Send</button>
+    </div>
+    <p class="muted">Try <code>GET /articles</code> (JSON over the ORM), <code>GET /articles.html</code>
+    (a Blade view), <code>GET /articles/1</code> (route params), or <code>POST /articles</code> with
+    <code>title=Hello&amp;published=1</code> (validation says no if you drop the title).</p>
+    <pre id="out">loading the framework… (~356 KB of WebAssembly)</pre>
+    <div class="row">
+      <button class="quiet" onclick="bench()">Run 100,000 requests</button>
+      <span id="bench" class="muted"></span>
+    </div>
+    <p class="muted">That's the full router → middleware → container → controller → ORM → response
+    path per request, compiled — including the JS↔WASM call overhead. Native is faster still.</p>
+  </div>
+
+  <h2>Why this exists</h2>
+  <p>It reimplements Laravel's core runtime conventions in C++20 — replicating functionality, not
+  transpiling PHP. Roughly 70% of Laravel is ordinary OOP that ports cleanly; the other 30% is
+  runtime metaprogramming (reflection-driven DI, magic methods, facades) that has to be consciously
+  redesigned. The result keeps Laravel's <em>shape</em> — providers, contracts, middleware
+  pipelines, <code>artisan</code> — with C++'s properties: no source on disk, no eval path, a
+  dispatch table fixed at link time, and a compiled request lifecycle.</p>
+
+  <ul class="grid">
+    <li><b>One lifecycle, many hosts</b>The same compiled code runs natively, from PHP via FFI, in the browser as WASM, or under a WASM runtime embedded in C++.</li>
+    <li><b>Zero-dependency core</b>The framework library needs the C++ standard library. Period. SQLite and OpenSSL are optional, gated add-ons.</li>
+    <li><b>Laravel-honest APIs</b>Query builder, relations, migrations, gates, CSRF, signed tokens (HS256), hashed personal access tokens, DB queue with atomic claims, a cron-style scheduler.</li>
+    <li><b>Hardened where it counts</b>A throwing handler is a 500, not a dead process; request/WS size limits; CSPRNG sessions with fixation defense; SQL identifier guards; constant-time token compares.</li>
+    <li><b>Tested, two ways</b>A zero-dependency test harness runs the whole suite in default and Release (<code>-Wall -Wextra -Werror</code>) before any tag.</li>
+    <li><b>Honest trade-offs</b>Where C++ can't (or shouldn't) do Laravel magic, the README says so and shows the explicit pattern instead.</li>
+  </ul>
+
+  <h2>In the wild</h2>
+  <div class="wild">
+    <p><b>A 1990s-style bulletin board system</b> — telnet, web, dial-up modem, and LoRa radio on its
+    own epoll + coroutine reactor — vendors the core for its sysop dashboard, JSON API, ORM,
+    identity (hashed tokens, HS256 room tokens, cookie sessions), and daily-turn door games on the
+    scheduler.</p>
+    <p><b>A Tandy Color Computer 3/4 emulator</b> compiles to WebAssembly and is served <em>by</em>
+    the framework via FetchContent: the multi-MB <code>.wasm</code> over static serving with
+    Range/ETag, plus versioned binary save-states.</p>
+    <p>One of them has upgraded across five consecutive releases with <b>zero source changes</b>.
+    And the two apps meet: the BBS streams raw CP437/ANSI over a WebSocket terminal endpoint the
+    emulator's terminal can dial — a genuine CoCo caller on a genuine BBS, in a browser.</p>
+  </div>
+
+  <h2>Use it</h2>
+  <pre><code># CMake ≥ 3.21
+include(FetchContent)
+FetchContent_Declare(lipp
+  GIT_REPOSITORY https://github.com/www-e-ventures/public-cpp-laravel.git
+  GIT_TAG v0.11.0)
+FetchContent_MakeAvailable(lipp)
+target_link_libraries(your_app PRIVATE framework)   # + framework_sqlite if you want SQLite</code></pre>
+  <p>Or clone and run the demo app directly:</p>
+  <pre><code>git clone https://github.com/www-e-ventures/public-cpp-laravel.git
+cd public-cpp-laravel
+cmake -S . -B build &amp;&amp; cmake --build build &amp;&amp; ctest --test-dir build
+./build/examples/blog/cpp-artisan serve 8080</code></pre>
+  <p>The repo's <code>docs/consuming.md</code> covers the three consumption recipes
+  (FetchContent, <code>add_subdirectory</code> vendoring, <code>find_package</code>), and
+  <code>examples/coco-web/</code> is a complete reference app — static SPA + JSON API + WebSocket
+  terminal.</p>
+
+  <footer>
+    <p>MIT licensed. Source, changelog, and docs:
+    <a href="https://github.com/www-e-ventures/public-cpp-laravel">github.com/www-e-ventures/public-cpp-laravel</a>.
+    The benchmark number is a single-machine node/browser measurement of the compiled kernel —
+    honest, but a microbenchmark; treat it as "the lifecycle is compiled", not a TechEmpower entry.
+    Demo data (<code>ada</code>, articles) is seeded in-memory per page load.</p>
+  </footer>
+</main>
+
+<script src="dist/lipp.js"></script>
+<script>
+  let M;
+  createLipp().then(function (m) {
+    M = m;
+    document.getElementById('out').textContent = 'ready — the framework is live in this tab. Try GET /articles';
+  });
+
+  function call(method, path, body) {
+    var b = M.ccall('lipp_handle', 'string', ['string', 'string', 'string'], [method, path, body || '']);
+    var s = M.ccall('lipp_status', 'number', [], []);
+    return { status: s, body: b };
+  }
+
+  function send() {
+    if (!M) return;
+    var m = document.getElementById('method').value;
+    var p = document.getElementById('path').value;
+    var b = document.getElementById('body').value;
+    var r = call(m, p, b);
+    document.getElementById('out').textContent = m + ' ' + p + '\n\nHTTP ' + r.status + '\n' + r.body;
+  }
+
+  function bench() {
+    if (!M) return;
+    var N = 100000, t0 = performance.now();
+    for (var i = 0; i < N; i++) call('GET', '/articles/1');
+    var ms = performance.now() - t0;
+    document.getElementById('bench').innerHTML =
+      N.toLocaleString() + ' requests in ' + ms.toFixed(0) + ' ms — <span class="stat">' +
+      Math.round(N / (ms / 1000)).toLocaleString() + ' req/s</span> in this tab';
+  }
+</script>
+</body>
+</html>
