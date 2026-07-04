@@ -192,10 +192,9 @@ cmake --build build
 ctest --test-dir build --output-on-failure    # framework + autowire + codegen + blog suites
 ```
 
-Or skip the build entirely: the framework runs **live in your browser** at
-<https://www-e-ventures.github.io/public-cpp-laravel/> — the landing page loads the compiled
-WASM module and handles requests client-side (`site/` holds the page; `publish-pages.sh`
-deploys it).
+Or skip the build entirely: `site/index.html` is a self-contained landing page that loads the
+compiled WASM module and runs the framework **in the browser** (`wasm/build.sh` produces the
+module; a hosted version is coming).
 
 Binaries live with their project: framework test runner at `build/framework_tests`; the app's
 `demo`, `cpp-artisan`, and `blog_tests` under `build/examples/blog/`. Everything compiles under
